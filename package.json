@@ -1,0 +1,35 @@
+{
+  "name": "linelock",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LineLock: Effectivity-aware verification of engineering evidence for Jira on Atlassian Forge (Vertical Slice)",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "benchmark": "tsx scripts/run-benchmark.ts",
+    "forge:lint": "forge lint",
+    "verify": "npm run typecheck && npm run test && npm run benchmark"
+  },
+  "dependencies": {
+    "@forge/api": "^8.5.0",
+    "@forge/bridge": "^7.3.0",
+    "@forge/events": "^3.0.10",
+    "@forge/kvs": "^2.1.2",
+    "@forge/react": "^12.5.0",
+    "@forge/resolver": "^2.0.2",
+    "@forge/sql": "^4.0.10",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@forge/cli": "^15.1.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.2.64",
+    "tsx": "^4.19.2",
+    "typescript": "~5.8.2",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=22.23.4"
+  }
+}
