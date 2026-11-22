@@ -1,4 +1,7 @@
 import type {
+  BaselineSliceObligationResult
+} from "../core/baselines";
+import type {
   ChangeOperation,
   EcoMetadata,
   FamilyCatalog,
@@ -61,22 +64,109 @@ export interface ConnectivityProbeResult {
   readonly diagnostics: readonly string[];
 }
 
+export interface VerificationIssueSeedSpec {
+  readonly evidenceId: string;
+  readonly summary: string;
+  readonly description: string;
+}
+
+export interface ProvisionedVerificationIssue {
+  readonly evidenceId: string;
+  readonly liveIssue: LiveJiraIssueProjection;
+}
+
 export interface JiraPlatformGateway {
   fetchLiveIssue(issueId: string): Promise<LiveJiraIssueProjection>;
+  fetchLiveIssueByKeyOrId(
+    issueKeyOrId: string
+  ): Promise<LiveJiraIssueProjection & { readonly projectKey: string }>;
   fetchProjectRoleMembers(
     projectKey: string,
     requiredRoles: readonly string[]
   ): Promise<Record<string, readonly string[]>>;
+  provisionVerificationIssues(params: {
+    readonly projectKey: string;
+    readonly ecoIssueKey: string;
+    readonly specs: readonly VerificationIssueSeedSpec[];
+  }): Promise<readonly ProvisionedVerificationIssue[]>;
   probeConnectivity(params: {
     readonly projectKey: string;
     readonly issueId: string;
   }): Promise<ConnectivityProbeResult>;
 }
 
+export interface LiveEvidenceIntegrityRow {
+  readonly evidenceId: string;
+  readonly obligationId: string;
+  readonly obligationCode: string;
+  readonly testedVariantId: string;
+  readonly jiraIssueId: string;
+  readonly jiraIssueKey: string;
+  readonly pinnedIssueStateHash: string;
+  readonly liveIssueStateHash: string | null;
+  readonly liveSummary: string | null;
+  readonly liveStatusCategoryKey: string | null;
+  readonly isReachable: boolean;
+  readonly statusIsDone: boolean;
+  readonly hashMatches: boolean;
+}
+
 export interface EcoWorkspaceView {
+  readonly callerAccountId?: string;
   readonly provisioning: ProvisioningStatusReport;
   readonly workspace: StoredEcoWorkspace | null;
   readonly evaluation: VerificationEvaluation | null;
+  readonly evidenceIntegrity?: readonly LiveEvidenceIntegrityRow[];
+}
+
+export type ScenarioPresetId =
+  | "BASELINE"
+  | "CAP_REV_C_ALL_5000"
+  | "CAP_REV_C_400V_5000"
+  | "COLD_SOAK_MINUS_40C"
+  | "SEAL_REV_B_3000";
+
+export type GovernancePolicyMode = "PRODUCTION_MULTI_ROLE" | "DEMO_SOLO_ADMIN";
+
+export type CounterfactualRequest =
+  | {
+      readonly kind: "CAP_REV_C_CUTOVER";
+      readonly targetVariants: "ALL" | readonly string[];
+      readonly serialFrom: number;
+    }
+  | {
+      readonly kind: "SEAL_REV_B_CUTOVER";
+      readonly targetVariants: "ALL" | readonly string[];
+      readonly serialFrom: number;
+    }
+  | {
+      readonly kind: "AMBIENT_ENVELOPE_SHIFT";
+      readonly variantId: string;
+      readonly minAmbientC: number;
+      readonly maxAmbientC: number;
+    };
+
+export interface CounterfactualDeltaSummary {
+  readonly currentGateState: string;
+  readonly simulatedGateState: string;
+  readonly currentSupportedCount: number;
+  readonly simulatedSupportedCount: number;
+  readonly currentBlockedCount: number;
+  readonly simulatedBlockedCount: number;
+  readonly currentRequiredRetests: number;
+  readonly simulatedRequiredRetests: number;
+}
+
+export interface CounterfactualSimulationResult {
+  readonly currentEvaluation: VerificationEvaluation;
+  readonly simulatedEvaluation: VerificationEvaluation;
+  readonly proposedOperations: readonly ChangeOperation[];
+  readonly delta: CounterfactualDeltaSummary;
+  readonly baselineComparison?: {
+    readonly b0: readonly BaselineSliceObligationResult[];
+    readonly b1: readonly BaselineSliceObligationResult[];
+    readonly b2: readonly BaselineSliceObligationResult[];
+  };
 }
 
 export class ConcurrentModificationError extends Error {

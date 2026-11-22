@@ -13,8 +13,7 @@ import {
   invertChangeOperations,
   qty,
   verifyEngineeringChange,
-  type LiveJiraIssueProjection,
-  type RoleAttestation
+  type LiveJiraIssueProjection
 } from "../src/core/index";
 import {
   buildCE01NoApprovedRule,
@@ -34,7 +33,6 @@ import {
 import {
   HELIOS_BASE_EPOCH_MS,
   buildHeliosCapRevCSubstitution,
-  createHeliosCatalog,
   createHeliosLiveIssues,
   createHeliosTrustedRoles,
   createHeliosVerificationInput
@@ -107,6 +105,25 @@ class InMemoryJiraGatewayStub implements JiraPlatformGateway {
       throw new Error(`Jira 404: Issue "${issueId}" not found`);
     }
     return found;
+  }
+
+  public async fetchLiveIssueByKeyOrId(
+    issueKeyOrId: string
+  ): Promise<LiveJiraIssueProjection & { readonly projectKey: string }> {
+    const direct = this.issuesById.get(issueKeyOrId);
+    if (direct) {
+      return { ...direct, projectKey: direct.issueKey.split("-")[0] ?? "ECO" };
+    }
+    for (const item of this.issuesById.values()) {
+      if (item.issueKey.toUpperCase() === issueKeyOrId.toUpperCase()) {
+        return { ...item, projectKey: item.issueKey.split("-")[0] ?? "ECO" };
+      }
+    }
+    throw new Error(`Jira 404: Issue "${issueKeyOrId}" not found`);
+  }
+
+  public async provisionVerificationIssues() {
+    return [];
   }
 
   public async fetchProjectRoleMembers(

@@ -5,16 +5,82 @@ modules:
       resolver:
         function: panel-resolver-fn
       render: native
-      title: LineLock Verification Harness
+      title: LineLock Assurance Cockpit
       icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
 
   jira:workflowValidator:
     - key: ll-release-validator
       name: LineLock Effectivity-Aware Evidence Gate
-      description: Blocks ECO release transitions unless all effective serial slices,
-        operating envelopes, and generation-bound role attestations are
-        verified.
+      description: Blocks ECO release transitions unless all effective serial slices, operating envelopes, and generation-bound role attestations are verified.
       function: workflow-validator-fn
+
+  rovo:agent:
+    - key: ll-assurance-agent
+      name: LineLock Assurance Analyst
+      description: Read-only engineering change verification and counterfactual serial-effectivity analyst backed by LineLock's deterministic Strong Kleene K3 kernel.
+      prompt: >
+        You are the LineLock Assurance Analyst, a strictly read-only industrial verification
+        assistant for Engineering Change Orders (ECOs) in Jira. Never claim authority to approve
+        an ECO, override a workflow gate, or certify physical product safety. Always invoke
+        LineLock's deterministic actions (`ll-act-inspect-eco`, `ll-act-sim-cutover`,
+        `ll-act-baselines`) before answering, and cite exact `snapshotSha256`,
+        `approvalGeneration`, `sliceId`, `obligationCode`, `CarryForwardRule` IDs, Strong Kleene
+        K3 truth values (`TRUE`, `FALSE`, `UNKNOWN`), and minimum bounded retest plans.
+      conversationStarters:
+        - Inspect why ECO-1 is currently blocked and list required retests or signoffs
+        - Simulate scoping Cap Rev C substitution to 400V packs only from serial 5000 on ECO-1
+        - Compare LineLock's verification of ECO-1 against traditional PLM/ALM baselines
+      actions:
+        - ll-act-inspect-eco
+        - ll-act-sim-cutover
+        - ll-act-baselines
+
+  action:
+    - key: ll-act-inspect-eco
+      name: Inspect ECO Assurance State
+      function: rovo-inspect-fn
+      actionVerb: GET
+      description: Reads live Jira verification evidence and evaluates effectivity-scoped assurance, Strong Kleene K3 proof traces, remediation plans, and attestation status for an ECO issue key.
+      inputs:
+        issueKey:
+          title: ECO Jira Issue Key
+          type: string
+          required: true
+          description: Jira issue key of the Engineering Change Order (for example ECO-1).
+
+    - key: ll-act-sim-cutover
+      name: Simulate Counterfactual Serial Cutover
+      function: rovo-sim-fn
+      actionVerb: GET
+      description: Runs a strictly read-only counterfactual simulation of substituting CAP-1210 Rev C from a target serial number on ALL, VAR_400V, or VAR_800V without mutating Forge SQL.
+      inputs:
+        issueKey:
+          title: ECO Jira Issue Key
+          type: string
+          required: true
+          description: Jira issue key of the Engineering Change Order (for example ECO-1).
+        variantScope:
+          title: Target Variant Scope
+          type: string
+          required: false
+          description: Product variant scope to simulate ('VAR_400V', 'VAR_800V', or 'ALL').
+        serialFrom:
+          title: Serial Cutover Start
+          type: integer
+          required: false
+          description: Starting unit serial number >= 1000 for the counterfactual substitution (default 5000).
+
+    - key: ll-act-baselines
+      name: Compare ECO Against Industry Baselines
+      function: rovo-base-fn
+      actionVerb: GET
+      description: Audits discrepancies between LineLock and B0 (timestamp freshness), B1 (untyped ALM suspect links), and B2 (version + standard envelope) on an ECO issue.
+      inputs:
+        issueKey:
+          title: ECO Jira Issue Key
+          type: string
+          required: true
+          description: Jira issue key of the Engineering Change Order (for example ECO-1).
 
   trigger:
     - key: ll-issue-reconciler
@@ -47,6 +113,12 @@ modules:
       handler: forge/index.lifecycleInstallTriggerHandler
     - key: migration-worker-fn
       handler: forge/index.migrationQueueConsumerHandler
+    - key: rovo-inspect-fn
+      handler: forge/index.rovoInspectEcoHandler
+    - key: rovo-sim-fn
+      handler: forge/index.rovoSimulateCutoverHandler
+    - key: rovo-base-fn
+      handler: forge/index.rovoCompareBaselinesHandler
 
 resources:
   - key: main-ui
@@ -56,6 +128,7 @@ permissions:
   scopes:
     - storage:app
     - read:jira-work
+    - write:jira-work
     - read:jira-user
 
 app:

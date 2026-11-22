@@ -1,8 +1,15 @@
 import Resolver from "@forge/resolver";
 import { Queue } from "@forge/events";
+import type { ChangeOperation } from "../core/types";
 import { buildHeliosCapRevCSubstitution } from "../scenarios/heliosBatteryPack";
 import { ForgeJiraPlatformGateway } from "./jiraGateway";
+import type {
+  CounterfactualRequest,
+  GovernancePolicyMode,
+  ScenarioPresetId
+} from "./ports";
 import { SqlProvisioningManager } from "./provisioning";
+import { createRovoActionHandlers } from "./rovo";
 import { LineLockService } from "./service";
 import { ForgeSqlCasStore } from "./sqlStore";
 
@@ -14,6 +21,11 @@ export const defaultLineLockService = new LineLockService({
   store: sqlStore,
   jira: jiraGateway,
   provisioning: provisioningManager
+});
+
+const rovoHandlers = createRovoActionHandlers({
+  service: defaultLineLockService,
+  jira: jiraGateway
 });
 
 const schemaMigrationQueue = new Queue({ key: "schema-migration-queue" });
@@ -66,7 +78,8 @@ resolver.define("getWorkspaceView", async (req) => {
   const ctx = extractIssueContext(req.context);
   return defaultLineLockService.getWorkspaceView({
     projectKey: ctx.projectKey,
-    ecoIssueId: ctx.issueId
+    ecoIssueId: ctx.issueId,
+    callerAccountId: ctx.accountId
   });
 });
 
@@ -79,7 +92,82 @@ resolver.define("seedHeliosWorkspace", async (req) => {
   });
   return defaultLineLockService.getWorkspaceView({
     projectKey: ctx.projectKey,
-    ecoIssueId: ctx.issueId
+    ecoIssueId: ctx.issueId,
+    callerAccountId: ctx.accountId
+  });
+});
+
+resolver.define("provisionLiveJiraWorkspace", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  return defaultLineLockService.provisionLiveJiraWorkspace({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    ecoIssueKey: ctx.issueKey,
+    callerAccountId: ctx.accountId
+  });
+});
+
+resolver.define("applyScenarioPreset", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  const payload = (req.payload ?? {}) as {
+    readonly expectedRevisionSeq: number;
+    readonly presetId: ScenarioPresetId;
+  };
+  return defaultLineLockService.applyScenarioPreset({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    expectedRevisionSeq: payload.expectedRevisionSeq,
+    callerAccountId: ctx.accountId,
+    presetId: payload.presetId
+  });
+});
+
+resolver.define("simulateCounterfactual", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  const payload = (req.payload ?? {}) as {
+    readonly request: CounterfactualRequest;
+    readonly includeBaselines?: boolean;
+  };
+  return defaultLineLockService.simulateCounterfactual({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    request: payload.request,
+    includeBaselines: payload.includeBaselines ?? true
+  });
+});
+
+resolver.define("commitCounterfactualOperations", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  const payload = (req.payload ?? {}) as {
+    readonly expectedRevisionSeq: number;
+    readonly proposedOperations: readonly ChangeOperation[];
+  };
+  await defaultLineLockService.commitProposalOperations({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    expectedRevisionSeq: payload.expectedRevisionSeq,
+    callerAccountId: ctx.accountId,
+    proposedOperations: payload.proposedOperations
+  });
+  return defaultLineLockService.getWorkspaceView({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    callerAccountId: ctx.accountId
+  });
+});
+
+resolver.define("switchGovernancePolicyMode", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  const payload = (req.payload ?? {}) as {
+    readonly expectedRevisionSeq: number;
+    readonly mode: GovernancePolicyMode;
+  };
+  return defaultLineLockService.switchGovernancePolicyMode({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    expectedRevisionSeq: payload.expectedRevisionSeq,
+    callerAccountId: ctx.accountId,
+    mode: payload.mode
   });
 });
 
@@ -91,7 +179,8 @@ resolver.define("proposeCapRevCFrom5000", async (req) => {
   };
   const current = await defaultLineLockService.getWorkspaceView({
     projectKey: ctx.projectKey,
-    ecoIssueId: ctx.issueId
+    ecoIssueId: ctx.issueId,
+    callerAccountId: ctx.accountId
   });
   if (!current.workspace) {
     throw new Error("Seed the ECO workspace before proposing BOM operations.");
@@ -101,24 +190,34 @@ resolver.define("proposeCapRevCFrom5000", async (req) => {
     payload.targetVariants ?? "ALL",
     5000
   );
-  return defaultLineLockService.commitProposalOperations({
+  await defaultLineLockService.commitProposalOperations({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     expectedRevisionSeq: payload.expectedRevisionSeq,
     callerAccountId: ctx.accountId,
     proposedOperations: ops
   });
+  return defaultLineLockService.getWorkspaceView({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    callerAccountId: ctx.accountId
+  });
 });
 
 resolver.define("revertToBaselineBom", async (req) => {
   const ctx = extractIssueContext(req.context);
   const payload = (req.payload ?? {}) as { readonly expectedRevisionSeq: number };
-  return defaultLineLockService.commitProposalOperations({
+  await defaultLineLockService.commitProposalOperations({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     expectedRevisionSeq: payload.expectedRevisionSeq,
     callerAccountId: ctx.accountId,
     proposedOperations: []
+  });
+  return defaultLineLockService.getWorkspaceView({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    callerAccountId: ctx.accountId
   });
 });
 
@@ -131,7 +230,7 @@ resolver.define("signRoleAttestation", async (req) => {
     readonly roleName: string;
     readonly rationale: string;
   };
-  return defaultLineLockService.recordHumanAttestation({
+  await defaultLineLockService.recordHumanAttestation({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     expectedRevisionSeq: payload.expectedRevisionSeq,
@@ -140,6 +239,11 @@ resolver.define("signRoleAttestation", async (req) => {
     signerAccountId: ctx.accountId,
     roleName: payload.roleName,
     rationale: payload.rationale
+  });
+  return defaultLineLockService.getWorkspaceView({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    callerAccountId: ctx.accountId
   });
 });
 
@@ -161,7 +265,8 @@ export async function workflowValidatorHandler(event: {
   if (!issueId || !projectKey) {
     return {
       result: false,
-      errorMessage: "LineLock fail-closed: Missing issueId or projectKey in workflow validator event."
+      errorMessage:
+        "LineLock fail-closed: Missing issueId or projectKey in workflow validator event."
     };
   }
 
@@ -209,8 +314,25 @@ export async function migrationQueueConsumerHandler(event: {
   await defaultLineLockService.triggerProvisioningRecovery(source);
 }
 
+export async function rovoInspectEcoHandler(payload: { readonly issueKey?: string }) {
+  return rovoHandlers.inspectEcoAssurance(payload);
+}
+
+export async function rovoSimulateCutoverHandler(payload: {
+  readonly issueKey?: string;
+  readonly variantScope?: string;
+  readonly serialFrom?: number;
+}) {
+  return rovoHandlers.simulateSerialCutover(payload);
+}
+
+export async function rovoCompareBaselinesHandler(payload: { readonly issueKey?: string }) {
+  return rovoHandlers.compareBaselines(payload);
+}
+
 export * from "./ports";
 export * from "./provisioning";
 export * from "./sqlStore";
 export * from "./jiraGateway";
 export * from "./service";
+export * from "./rovo";
