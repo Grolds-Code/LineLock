@@ -1,7 +1,7 @@
-import { computePinnedIssueStateHash, computeSnapshotSha256 } from "./canonical.js";
-import { formatInterval, resolveEffectiveSlices } from "./intervals.js";
-import { evaluatePredicateK3, scalarsExactEqual } from "./predicates.js";
-import { computeRemediationPlans } from "./remediation.js";
+import { computePinnedIssueStateHash, computeSnapshotSha256 } from "./canonical";
+import { formatInterval, resolveEffectiveSlices } from "./intervals";
+import { evaluatePredicateK3, scalarsExactEqual } from "./predicates";
+import { computeRemediationPlans } from "./remediation";
 import type {
   AttestationStatusSummary,
   CarryForwardRule,
@@ -18,7 +18,7 @@ import type {
   VerificationEvidence,
   VerificationInput,
   VerificationObligation
-} from "./types.js";
+} from "./types";
 
 function obligationAppliesToVariant(obl: VerificationObligation, variantId: string): boolean {
   return obl.applicableVariants === "ALL" || obl.applicableVariants.includes(variantId);

@@ -10,8 +10,8 @@ import {
   ProvisioningNotReadyError,
   type StoredEcoWorkspace,
   type VerificationStore
-} from "./ports.js";
-import type { ForgeSqlClientLike, SqlPreparedStatementLike } from "./provisioning.js";
+} from "./ports";
+import type { ForgeSqlClientLike, SqlPreparedStatementLike } from "./provisioning";
 
 interface EcoWorkspaceSqlRow {
   readonly eco_issue_id: string;

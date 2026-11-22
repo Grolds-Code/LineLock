@@ -11,7 +11,9 @@ modules:
   jira:workflowValidator:
     - key: ll-release-validator
       name: LineLock Effectivity-Aware Evidence Gate
-      description: Blocks ECO release transitions unless all effective serial slices, operating envelopes, and generation-bound role attestations are verified.
+      description: Blocks ECO release transitions unless all effective serial slices,
+        operating envelopes, and generation-bound role attestations are
+        verified.
       function: workflow-validator-fn
 
   trigger:
@@ -59,4 +61,4 @@ permissions:
 app:
   runtime:
     name: nodejs22.x
-  id: ari:cloud:ecosystem::app/00000000-0000-0000-0000-000000000000
+  id: ari:cloud:ecosystem::app/806d313b-57d3-41d5-b781-73e48a1effe7

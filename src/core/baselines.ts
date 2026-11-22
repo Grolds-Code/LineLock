@@ -1,6 +1,6 @@
-import { computePinnedIssueStateHash } from "./canonical.js";
-import { resolveEffectiveSlices } from "./intervals.js";
-import { compareExactQuantities } from "./predicates.js";
+import { computePinnedIssueStateHash } from "./canonical";
+import { resolveEffectiveSlices } from "./intervals";
+import { compareExactQuantities } from "./predicates";
 import type {
   EffectiveSlice,
   ProductVariant,
@@ -8,7 +8,7 @@ import type {
   SerialInterval,
   VerificationInput,
   VerificationObligation
-} from "./types.js";
+} from "./types";
 
 export type BaselineVerdict = "SUPPORTED" | "REQUIRES_REVERIFICATION";
 

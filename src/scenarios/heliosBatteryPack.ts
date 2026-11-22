@@ -1,5 +1,5 @@
-import { computePinnedIssueStateHash } from "../core/canonical.js";
-import { buildSerialScopedSubstitutionOps } from "../core/intervals.js";
+import { computePinnedIssueStateHash } from "../core/canonical";
+import { buildSerialScopedSubstitutionOps } from "../core/intervals";
 import {
   boolVal,
   enumVal,
@@ -12,7 +12,7 @@ import {
   type LiveJiraIssueProjection,
   type VerificationEvidence,
   type VerificationInput
-} from "../core/types.js";
+} from "../core/types";
 
 export const HELIOS_BASE_EPOCH_MS = 1_795_000_000_000;
 

@@ -6,7 +6,7 @@ import type {
   RetestDominanceRule,
   SliceObligationEvaluation,
   VerificationObligation
-} from "./types.js";
+} from "./types";
 
 export const EXACT_MAX_UNIVERSE = 16;
 export const EXACT_MAX_CANDIDATES = 20;

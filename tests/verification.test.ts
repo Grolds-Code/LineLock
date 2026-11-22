@@ -15,7 +15,7 @@ import {
   verifyEngineeringChange,
   type LiveJiraIssueProjection,
   type RoleAttestation
-} from "../src/core/index.js";
+} from "../src/core/index";
 import {
   buildCE01NoApprovedRule,
   buildCE02CoupledUnlistedSlot,
@@ -30,7 +30,7 @@ import {
   buildCE11aSameRevColdSoakRegression,
   buildCE11bUnexaminedEnvironmentalAxis,
   buildLabeledBenchmarkCorpus
-} from "../src/scenarios/counterexamples.js";
+} from "../src/scenarios/counterexamples";
 import {
   HELIOS_BASE_EPOCH_MS,
   buildHeliosCapRevCSubstitution,
@@ -38,7 +38,7 @@ import {
   createHeliosLiveIssues,
   createHeliosTrustedRoles,
   createHeliosVerificationInput
-} from "../src/scenarios/heliosBatteryPack.js";
+} from "../src/scenarios/heliosBatteryPack";
 import {
   AuthorizationError,
   ConcurrentModificationError,
@@ -52,7 +52,7 @@ import {
   type ConnectivityProbeResult,
   type JiraPlatformGateway,
   type MigrationRunnerLike
-} from "../src/forge/index.js";
+} from "../src/forge/index";
 
 const require = createRequire(import.meta.url);
 const { MigrationRunner: SdkMigrationRunner } = require("@forge/sql/out/migration.js") as {

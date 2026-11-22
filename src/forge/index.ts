@@ -1,10 +1,10 @@
 import Resolver from "@forge/resolver";
 import { Queue } from "@forge/events";
-import { buildHeliosCapRevCSubstitution } from "../scenarios/heliosBatteryPack.js";
-import { ForgeJiraPlatformGateway } from "./jiraGateway.js";
-import { SqlProvisioningManager } from "./provisioning.js";
-import { LineLockService } from "./service.js";
-import { ForgeSqlCasStore } from "./sqlStore.js";
+import { buildHeliosCapRevCSubstitution } from "../scenarios/heliosBatteryPack";
+import { ForgeJiraPlatformGateway } from "./jiraGateway";
+import { SqlProvisioningManager } from "./provisioning";
+import { LineLockService } from "./service";
+import { ForgeSqlCasStore } from "./sqlStore";
 
 const provisioningManager = new SqlProvisioningManager();
 const sqlStore = new ForgeSqlCasStore();
@@ -209,8 +209,8 @@ export async function migrationQueueConsumerHandler(event: {
   await defaultLineLockService.triggerProvisioningRecovery(source);
 }
 
-export * from "./ports.js";
-export * from "./provisioning.js";
-export * from "./sqlStore.js";
-export * from "./jiraGateway.js";
-export * from "./service.js";
+export * from "./ports";
+export * from "./provisioning";
+export * from "./sqlStore";
+export * from "./jiraGateway";
+export * from "./service";

@@ -1,4 +1,4 @@
-import { buildSerialScopedSubstitutionOps } from "../core/intervals.js";
+import { buildSerialScopedSubstitutionOps } from "../core/intervals";
 import {
   boolVal,
   enumVal,
@@ -7,14 +7,14 @@ import {
   type FamilyCatalog,
   type ItemRevision,
   type VerificationInput
-} from "../core/types.js";
+} from "../core/types";
 import {
   buildHeliosCapRevCSubstitution,
   createHeliosCatalog,
   createHeliosDefaultEco,
   createHeliosLiveIssues,
   createHeliosTrustedRoles
-} from "./heliosBatteryPack.js";
+} from "./heliosBatteryPack";
 
 export interface LabeledBenchmarkScenario {
   readonly scenarioId: string;

@@ -1,4 +1,4 @@
-import { canonicalizeJson, materializeEffectiveCatalogState } from "./canonical.js";
+import { canonicalizeJson, materializeEffectiveCatalogState } from "./canonical";
 import type {
   BomEffectivityEdge,
   ChangeOperation,
@@ -8,7 +8,7 @@ import type {
   ProductVariant,
   SerialInterval,
   SliceStructuralDiagnostic
-} from "./types.js";
+} from "./types";
 
 function edgeAppliesToVariantAndSerial(
   edge: BomEffectivityEdge,

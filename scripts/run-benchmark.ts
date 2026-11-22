@@ -10,9 +10,9 @@ import {
   type FamilyCatalog,
   type ItemRevision,
   type VerificationInput
-} from "../src/core/index.js";
-import { buildLabeledBenchmarkCorpus } from "../src/scenarios/counterexamples.js";
-import { createHeliosVerificationInput } from "../src/scenarios/heliosBatteryPack.js";
+} from "../src/core/index";
+import { buildLabeledBenchmarkCorpus } from "../src/scenarios/counterexamples";
+import { createHeliosVerificationInput } from "../src/scenarios/heliosBatteryPack";
 
 interface MethodMetrics {
   readonly method: string;

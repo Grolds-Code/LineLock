@@ -1,6 +1,6 @@
 import api, { route } from "@forge/api";
-import type { LiveJiraIssueProjection, ScalarValue } from "../core/types.js";
-import type { ConnectivityProbeResult, JiraPlatformGateway } from "./ports.js";
+import type { LiveJiraIssueProjection, ScalarValue } from "../core/types";
+import type { ConnectivityProbeResult, JiraPlatformGateway } from "./ports";
 
 interface JiraIssueRestResponse {
   readonly id: string;

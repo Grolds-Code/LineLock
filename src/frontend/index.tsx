@@ -8,7 +8,7 @@ import ForgeReconciler, {
   Text
 } from "@forge/react";
 import { invoke } from "@forge/bridge";
-import type { ConnectivityProbeResult, EcoWorkspaceView } from "../forge/ports.js";
+import type { ConnectivityProbeResult, EcoWorkspaceView } from "../forge/ports";
 
 function unwrapInvoke<T>(raw: T | { readonly body: T }): T {
   if (raw && typeof raw === "object" && "body" in raw) {

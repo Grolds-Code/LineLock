@@ -98,7 +98,7 @@ vi.mock("@forge/api", () => {
   };
 });
 
-import { ForgeJiraPlatformGateway } from "../src/forge/jiraGateway.js";
+import { ForgeJiraPlatformGateway } from "../src/forge/jiraGateway";
 
 describe("ForgeJiraPlatformGateway — @forge/api REST Contract", () => {
   it("executes connectivity probe, parses ADF issue descriptions, and resolves project role actors", async () => {

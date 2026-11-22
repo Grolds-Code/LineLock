@@ -6,7 +6,7 @@ import type {
   ScalarValue,
   TruthValue,
   ValueRef
-} from "./types.js";
+} from "./types";
 
 export interface PredicateEvalContext {
   readonly resolvedSlotBindings: Readonly<Record<string, string>>;

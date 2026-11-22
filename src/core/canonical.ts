@@ -11,7 +11,7 @@ import type {
   ScalarValue,
   VerificationEvidence,
   VerificationObligation
-} from "./types.js";
+} from "./types";
 
 /**
  * RFC 8785 (JSON Canonicalization Scheme) deterministic serializer.

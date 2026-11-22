@@ -6,7 +6,7 @@ import {
   type Result,
   type UpdateQueryResponse
 } from "@forge/sql";
-import type { ProvisioningState, ProvisioningStatusReport } from "./ports.js";
+import type { ProvisioningState, ProvisioningStatusReport } from "./ports";
 
 export interface SqlPreparedStatementLike<TResponse> {
   bindParams(...args: unknown[]): SqlPreparedStatementLike<TResponse>;

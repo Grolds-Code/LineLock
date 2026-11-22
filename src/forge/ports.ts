@@ -7,7 +7,7 @@ import type {
   PendingTransitionIntent,
   RoleAttestation,
   VerificationEvaluation
-} from "../core/types.js";
+} from "../core/types";
 
 export type ProvisioningState =
   | "UNPROVISIONED"

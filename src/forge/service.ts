@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { verifyEngineeringChange } from "../core/verifier.js";
+import { verifyEngineeringChange } from "../core/verifier";
 import type {
   ChangeOperation,
   EcoMetadata,
@@ -9,12 +9,12 @@ import type {
   PendingTransitionIntent,
   RoleAttestation,
   VerificationEvaluation
-} from "../core/types.js";
+} from "../core/types";
 import {
   createHeliosCatalog,
   createHeliosDefaultEco,
   createHeliosLiveIssues
-} from "../scenarios/heliosBatteryPack.js";
+} from "../scenarios/heliosBatteryPack";
 import {
   AuthorizationError,
   ConcurrentModificationError,
@@ -27,8 +27,8 @@ import {
   type ProvisioningStatusReport,
   type StoredEcoWorkspace,
   type VerificationStore
-} from "./ports.js";
-import type { SqlProvisioningManager } from "./provisioning.js";
+} from "./ports";
+import type { SqlProvisioningManager } from "./provisioning";
 
 export const DEFAULT_PENDING_INTENT_TTL_MS = 120_000;
 
