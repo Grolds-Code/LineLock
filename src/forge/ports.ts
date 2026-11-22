@@ -50,6 +50,8 @@ export interface VerificationStore {
     expectedRevisionSeq: number,
     nextWorkspace: Omit<StoredEcoWorkspace, "revisionSeq">
   ): Promise<StoredEcoWorkspace>;
+  registerEvidenceIssueIds?(issueIds: readonly string[]): Promise<void>;
+  isRegisteredEvidenceIssue?(issueId: string): Promise<boolean>;
 }
 
 export interface ConnectivityProbeResult {
@@ -88,6 +90,7 @@ export interface JiraPlatformGateway {
     readonly projectKey: string;
     readonly ecoIssueKey: string;
     readonly specs: readonly VerificationIssueSeedSpec[];
+    readonly onCreatedBeforeTransition?: (createdIssueIds: readonly string[]) => Promise<void>;
   }): Promise<readonly ProvisionedVerificationIssue[]>;
   probeConnectivity(params: {
     readonly projectKey: string;

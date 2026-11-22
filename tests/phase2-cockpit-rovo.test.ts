@@ -96,31 +96,53 @@ class LiveProvisioningJiraStub implements JiraPlatformGateway {
     return out;
   }
 
+  public validatorGuard:
+    | ((issueId: string) => Promise<{ readonly result: boolean; readonly errorMessage?: string }>)
+    | null = null;
+
   public async provisionVerificationIssues(params: {
     readonly projectKey: string;
     readonly ecoIssueKey: string;
     readonly specs: readonly VerificationIssueSeedSpec[];
+    readonly onCreatedBeforeTransition?: (createdIssueIds: readonly string[]) => Promise<void>;
   }): Promise<readonly ProvisionedVerificationIssue[]> {
-    const created: ProvisionedVerificationIssue[] = [];
+    const rawCreated: { evidenceId: string; id: string; key: string; spec: VerificationIssueSeedSpec }[] = [];
     let seq = 2;
     for (const spec of params.specs) {
       const id = String(this.nextId++);
       const key = `${params.projectKey}-${seq++}`;
-      const live: LiveJiraIssueProjection & { projectKey: string } = {
+      this.issuesById.set(id, {
         issueId: id,
         issueKey: key,
         projectKey: params.projectKey,
         summary: spec.summary,
         description: spec.description,
-        statusCategoryKey: "done",
-        resolutionName: "Done",
+        statusCategoryKey: "new",
+        resolutionName: null,
         updatedAtEpochMs: HELIOS_BASE_EPOCH_MS + seq * 1000,
         structuredFields: {}
-      };
-      this.issuesById.set(id, live);
+      });
+      rawCreated.push({ evidenceId: spec.evidenceId, id, key, spec });
+    }
+
+    if (params.onCreatedBeforeTransition) {
+      await params.onCreatedBeforeTransition(rawCreated.map((c) => c.id));
+    }
+
+    const created: ProvisionedVerificationIssue[] = [];
+    for (const item of rawCreated) {
+      // Simulate Jira running the project's Done workflow validator on every newly created ticket!
+      if (this.validatorGuard) {
+        const verdict = await this.validatorGuard(item.id);
+        if (!verdict.result) {
+          throw new Error(`Child ticket transition blocked by workflow validator: ${verdict.errorMessage}`);
+        }
+      }
+      this.setIssueStatus(item.id, "done");
+      const live = this.issuesById.get(item.id)!;
       const { projectKey: _ignored, ...proj } = live;
       created.push({
-        evidenceId: spec.evidenceId,
+        evidenceId: item.evidenceId,
         liveIssue: proj
       });
     }
@@ -167,11 +189,17 @@ describe("Phase 2 — Live Jira Provisioner, Counterfactual Simulator, Policy Go
         return clockMs;
       }
     });
+    jira.validatorGuard = (issueId: string) =>
+      service.validateReleaseTransition({
+        projectKey: "ECO",
+        ecoIssueId: issueId,
+        actorAccountId: "acct-solo-admin"
+      });
     const rovo = createRovoActionHandlers({ service, jira });
     return { jira, store, service, rovo };
   }
 
-  it("provisions 6 live Jira qualification tickets (ECO-2..ECO-7), verifies SHA-256 content pins, and catches live Jira tampering", async () => {
+  it("provisions 6 live Jira qualification tickets (ECO-2..ECO-7) through an active Done workflow validator, verifies SHA-256 pins, and still blocks uninitialized ECOs", async () => {
     const { jira, service } = setupPhase2Harness();
 
     const provisionedView = await service.provisionLiveJiraWorkspace({
@@ -180,6 +208,14 @@ describe("Phase 2 — Live Jira Provisioner, Counterfactual Simulator, Policy Go
       ecoIssueKey: "ECO-1",
       callerAccountId: "acct-solo-admin"
     });
+
+    // Verify random uninitialized ECO issue 99999 STILL fails closed!
+    const uninitializedEcoVerdict = await service.validateReleaseTransition({
+      projectKey: "ECO",
+      ecoIssueId: "99999",
+      actorAccountId: "acct-solo-admin"
+    });
+    expect(uninitializedEcoVerdict.result).toBe(false);
 
     expect(provisionedView.workspace?.revisionSeq).toBe(1);
     expect(provisionedView.evaluation?.gateState).toBe("AWAITING_ATTESTATION");

@@ -219,7 +219,12 @@ export class LineLockService {
     const provisionedList = await this.jira.provisionVerificationIssues({
       projectKey: params.projectKey,
       ecoIssueKey: resolvedEcoKey,
-      specs
+      specs,
+      onCreatedBeforeTransition: async (createdIds) => {
+        if (this.store.registerEvidenceIssueIds) {
+          await this.store.registerEvidenceIssueIds(createdIds);
+        }
+      }
     });
 
     const provisionedByEvidenceId = new Map(
@@ -633,6 +638,14 @@ export class LineLockService {
 
       const ws = await this.store.getEcoWorkspace(params.ecoIssueId);
       if (!ws) {
+        if (this.store.isRegisteredEvidenceIssue) {
+          const isChildEvidenceTicket = await this.store.isRegisteredEvidenceIssue(
+            params.ecoIssueId
+          );
+          if (isChildEvidenceTicket) {
+            return { result: true };
+          }
+        }
         return {
           result: false,
           errorMessage: `LineLock block: No initialized engineering verification workspace for ECO issue ${params.ecoIssueId}.`

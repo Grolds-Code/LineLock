@@ -148,7 +148,7 @@ const TraceTreeView: React.FC<{
       <Stack key={`${depth}-${idx}-${n.exprKind}`} space="space.075">
         <Inline space="space.100" alignBlock="center">
           <Text>{indentPrefix}</Text>
-          <Lozenge appearance={truthAppearance(n.value)} isBold>
+          <Lozenge appearance={truthAppearance(n.value)} isBold maxWidth={340}>
             {n.value}
           </Lozenge>
           <Code>{n.exprKind}</Code>
@@ -401,20 +401,20 @@ const LineLockAssuranceCockpit: React.FC = () => {
             <Inline space="space.100" alignBlock="center">
               <Heading size="small">LineLock Assurance Cockpit</Heading>
               {evaluation ? (
-                <Lozenge appearance={gateAppearance(evaluation.gateState)} isBold>
+                <Lozenge appearance={gateAppearance(evaluation.gateState)} isBold maxWidth={340}>
                   {evaluation.gateState}
                 </Lozenge>
               ) : (
                 <Lozenge appearance="default">UNINITIALIZED</Lozenge>
               )}
               {evaluation ? (
-                <Lozenge appearance={evaluation.transitionAllowed ? "success" : "removed"} isBold>
+                <Lozenge appearance={evaluation.transitionAllowed ? "success" : "removed"} isBold maxWidth={340}>
                   {evaluation.transitionAllowed ? "RELEASE ALLOWED" : "WORKFLOW LOCKED"}
                 </Lozenge>
               ) : null}
             </Inline>
 
-            <ButtonGroup>
+            <Inline space="space.100" shouldWrap>
               <LoadingButton
                 isLoading={busyAction === "refresh"}
                 onClick={() => runAction("refresh", refreshView)}
@@ -429,7 +429,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                   Re-Provision 6 Live Jira Tests
                 </LoadingButton>
               ) : null}
-            </ButtonGroup>
+            </Inline>
           </Inline>
 
           <Inline space="space.100" alignBlock="center" shouldWrap>
@@ -493,7 +493,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
               12V Conducted EMC, and IP67 Enclosure Ingress), transition them to Done, link them to
               this ECO, and pin their live RFC 8785 SHA-256 content hashes in Forge SQL.
             </Text>
-            <ButtonGroup>
+            <Inline space="space.100" shouldWrap>
               <LoadingButton
                 appearance="primary"
                 isLoading={busyAction === "provision-live"}
@@ -507,7 +507,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
               >
                 Seed Offline Reference IDs Only
               </LoadingButton>
-            </ButtonGroup>
+            </Inline>
           </Stack>
         </Box>
       ) : null}
@@ -557,7 +557,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
               <Box xcss={cardBoxStyle}>
                 <Stack space="space.100">
                   <Heading size="xsmall">Commit Engineering Change Scenario (CAS + Gen Increment)</Heading>
-                  <ButtonGroup>
+                  <Inline space="space.100" shouldWrap>
                     <LoadingButton
                       isLoading={busyAction === "preset:CAP_REV_C_ALL_5000"}
                       onClick={() =>
@@ -606,7 +606,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                     >
                       Revert to Baseline BOM
                     </LoadingButton>
-                  </ButtonGroup>
+                  </Inline>
                 </Stack>
               </Box>
 
@@ -660,7 +660,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                       {
                         key: "verdict",
                         content: (
-                          <Lozenge appearance={sliceStatusAppearance(so.status)} isBold>
+                          <Lozenge appearance={sliceStatusAppearance(so.status)} isBold maxWidth={340}>
                             {so.status}
                           </Lozenge>
                         )
@@ -710,7 +710,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                       <Heading size="xsmall">
                         {`Proof Trace: ${inspectedSliceObl.variantId} ${formatSerialRange(inspectedSliceObl.interval)} — ${inspectedSliceObl.obligationCode}`}
                       </Heading>
-                      <Lozenge appearance={sliceStatusAppearance(inspectedSliceObl.status)} isBold>
+                      <Lozenge appearance={sliceStatusAppearance(inspectedSliceObl.status)} isBold maxWidth={340}>
                         {inspectedSliceObl.status}
                       </Lozenge>
                     </Inline>
@@ -930,7 +930,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                             <Heading size="xsmall">
                               {`Obligation ${plan.obligationCode} (${plan.unsatisfiedSliceIds.length} unsatisfied slice(s))`}
                             </Heading>
-                            <Lozenge appearance="inprogress" isBold>
+                            <Lozenge appearance="inprogress" isBold maxWidth={340}>
                               {`SOLVER: ${plan.solverMode}`}
                             </Lozenge>
                           </Inline>
@@ -965,7 +965,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                       appearance={
                         workspace.catalog.policy.enforceSeparationOfDuties ? "inprogress" : "moved"
                       }
-                      isBold
+                      isBold maxWidth={340}
                     >
                       {workspace.catalog.policy.enforceSeparationOfDuties
                         ? "MULTI-ROLE SEPARATION OF DUTIES"
@@ -979,7 +979,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                     approvalGeneration and invalidates prior signatures.
                   </Text>
 
-                  <ButtonGroup>
+                  <Inline space="space.100" shouldWrap>
                     <LoadingButton
                       isLoading={busyAction === "policy:PRODUCTION_MULTI_ROLE"}
                       onClick={() => handleSwitchPolicyMode("PRODUCTION_MULTI_ROLE")}
@@ -992,7 +992,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                     >
                       Switch to Solo-Evaluator Demo Policy (Administrators Role)
                     </LoadingButton>
-                  </ButtonGroup>
+                  </Inline>
 
                   <Inline space="space.100" shouldWrap>
                     <Code>{`Required Roles: ${evaluation.attestationSummary.requiredRoles.join(", ")}`}</Code>
@@ -1062,7 +1062,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                   ) : (
                     evaluation.attestationSummary.acceptedAttestations.map((att) => (
                       <Inline key={att.attestationId} space="space.100" shouldWrap>
-                        <Lozenge appearance="success" isBold>
+                        <Lozenge appearance="success" isBold maxWidth={340}>
                           {att.roleName}
                         </Lozenge>
                         <Code>{`Signer: ${att.signerAccountId}`}</Code>
@@ -1079,7 +1079,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                       </Heading>
                       {evaluation.attestationSummary.rejectedReasons.map((rej) => (
                         <Inline key={rej.attestationId} space="space.100" shouldWrap>
-                          <Lozenge appearance="removed" isBold>
+                          <Lozenge appearance="removed" isBold maxWidth={340}>
                             INVALIDATED
                           </Lozenge>
                           <Code>{rej.attestationId.slice(0, 12)}</Code>
@@ -1143,7 +1143,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                     {
                       key: "status",
                       content: (
-                        <Lozenge appearance={row.statusIsDone ? "success" : "moved"} isBold>
+                        <Lozenge appearance={row.statusIsDone ? "success" : "moved"} isBold maxWidth={340}>
                           {row.liveStatusCategoryKey ?? "UNREACHABLE"}
                         </Lozenge>
                       )
@@ -1165,6 +1165,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                         <Lozenge
                           appearance={row.statusIsDone && row.hashMatches ? "success" : "removed"}
                           isBold
+                          maxWidth={340}
                         >
                           {row.statusIsDone && row.hashMatches ? "PIN VERIFIED" : "DRIFT / MISSING"}
                         </Lozenge>

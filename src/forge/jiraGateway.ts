@@ -206,11 +206,16 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     readonly projectKey: string;
     readonly ecoIssueKey: string;
     readonly specs: readonly VerificationIssueSeedSpec[];
+    readonly onCreatedBeforeTransition?: (createdIssueIds: readonly string[]) => Promise<void>;
   }): Promise<readonly ProvisionedVerificationIssue[]> {
     const issueTypeId = await this.resolveStandardIssueTypeId(params.projectKey);
     const linkTypeName = await this.resolveDefaultLinkTypeName();
 
-    const provisioned: ProvisionedVerificationIssue[] = [];
+    const createdItems: {
+      readonly evidenceId: string;
+      readonly id: string;
+      readonly key: string;
+    }[] = [];
 
     for (const spec of params.specs) {
       const createRes = await api.asApp().requestJira(route`/rest/api/3/issue`, {
@@ -237,11 +242,24 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       }
 
       const created = (await createRes.json()) as { readonly id: string; readonly key: string };
+      createdItems.push({
+        evidenceId: spec.evidenceId,
+        id: String(created.id),
+        key: created.key
+      });
+    }
 
-      // Transition newly created verification work item to Done status category
-      await this.transitionIssueToDoneCategory(created.id);
+    // Register newly created child test issue IDs in Forge SQL BEFORE transitioning them to Done
+    // so shared-project workflow validators recognize them as test tickets rather than uninitialized ECOs.
+    if (params.onCreatedBeforeTransition) {
+      await params.onCreatedBeforeTransition(createdItems.map((c) => c.id));
+    }
 
-      // Best-effort link to parent ECO work item so judges see linked tests in Jira's native UI
+    const provisioned: ProvisionedVerificationIssue[] = [];
+
+    for (const item of createdItems) {
+      await this.transitionIssueToDoneCategory(item.id);
+
       if (linkTypeName && params.ecoIssueKey) {
         try {
           await api.asApp().requestJira(route`/rest/api/3/issueLink`, {
@@ -252,7 +270,7 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
             },
             body: JSON.stringify({
               type: { name: linkTypeName },
-              inwardIssue: { key: created.key },
+              inwardIssue: { key: item.key },
               outwardIssue: { key: params.ecoIssueKey }
             })
           });
@@ -261,9 +279,9 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
         }
       }
 
-      const liveIssue = await this.fetchLiveIssue(created.id);
+      const liveIssue = await this.fetchLiveIssue(item.id);
       provisioned.push({
-        evidenceId: spec.evidenceId,
+        evidenceId: item.evidenceId,
         liveIssue
       });
     }

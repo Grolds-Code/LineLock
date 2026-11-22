@@ -194,6 +194,87 @@ export class ForgeSqlCasStore implements VerificationStore {
     };
   }
 
+  public async registerEvidenceIssueIds(issueIds: readonly string[]): Promise<void> {
+    if (issueIds.length === 0) return;
+    const registryKey = "__linelock_evidence_registry__";
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const res = await this.sqlClient
+        .prepare<EcoWorkspaceSqlRow>(
+          "SELECT eco_issue_id, revision_seq, approval_generation, updated_at_epoch_ms, payload_json FROM linelock_eco_workspaces WHERE eco_issue_id = ?"
+        )
+        .bindParams(registryKey)
+        .execute();
+
+      const existing = res.rows[0];
+      if (!existing) {
+        const merged = [...new Set(issueIds)].sort();
+        try {
+          const ins = await this.sqlClient
+            .prepare<UpdateQueryResponse>(
+              "INSERT INTO linelock_eco_workspaces (eco_issue_id, revision_seq, approval_generation, updated_at_epoch_ms, payload_json) VALUES (?, ?, ?, ?, ?)"
+            )
+            .bindParams(
+              registryKey,
+              1,
+              1,
+              Date.now(),
+              JSON.stringify({ registeredEvidenceIssueIds: merged })
+            )
+            .execute();
+          if (ins.rows.affectedRows === 1) return;
+        } catch (err) {
+          if (!isDuplicatePrimaryKeyError(err)) throw err;
+        }
+        continue;
+      }
+
+      const parsed = JSON.parse(existing.payload_json) as {
+        readonly registeredEvidenceIssueIds?: readonly string[];
+      };
+      const merged = [
+        ...new Set([...(parsed.registeredEvidenceIssueIds ?? []), ...issueIds])
+      ].sort();
+      const expectedRev = parseBigIntNumber(existing.revision_seq, "revision_seq");
+      const upd = await this.sqlClient
+        .prepare<UpdateQueryResponse>(
+          "UPDATE linelock_eco_workspaces SET revision_seq = ?, approval_generation = ?, updated_at_epoch_ms = ?, payload_json = ? WHERE eco_issue_id = ? AND revision_seq = ?"
+        )
+        .bindParams(
+          expectedRev + 1,
+          expectedRev + 1,
+          Date.now(),
+          JSON.stringify({ registeredEvidenceIssueIds: merged }),
+          registryKey,
+          expectedRev
+        )
+        .execute();
+
+      if (upd.rows.affectedRows === 1) return;
+    }
+
+    throw new ConcurrentModificationError(
+      "Failed to register verification evidence issue IDs after 5 CAS attempts."
+    );
+  }
+
+  public async isRegisteredEvidenceIssue(issueId: string): Promise<boolean> {
+    const registryKey = "__linelock_evidence_registry__";
+    const res = await this.sqlClient
+      .prepare<EcoWorkspaceSqlRow>(
+        "SELECT eco_issue_id, revision_seq, approval_generation, updated_at_epoch_ms, payload_json FROM linelock_eco_workspaces WHERE eco_issue_id = ?"
+      )
+      .bindParams(registryKey)
+      .execute();
+
+    const row = res.rows[0];
+    if (!row) return false;
+    const parsed = JSON.parse(row.payload_json) as {
+      readonly registeredEvidenceIssueIds?: readonly string[];
+    };
+    return Boolean(parsed.registeredEvidenceIssueIds?.includes(issueId));
+  }
+
   private rethrowIfNotProvisioned(err: unknown): void {
     if (err instanceof ForgeSQLAPIError && err.code === errorCodes.APP_NOT_ENABLED) {
       throw new ProvisioningNotReadyError(
