@@ -1,3 +1,4 @@
+import * as forgeApiMod from "@forge/api";
 import api, { route } from "@forge/api";
 import type { LiveJiraIssueProjection, ScalarValue } from "../core/types";
 import type {
@@ -6,6 +7,42 @@ import type {
   ProvisionedVerificationIssue,
   VerificationIssueSeedSpec
 } from "./ports";
+
+type ForgeRequestInit = Parameters<ReturnType<typeof api.asApp>["requestJira"]>[1];
+type ForgeResponse = Awaited<ReturnType<ReturnType<typeof api.asApp>["requestJira"]>>;
+
+function isUnavailableTokenProxyError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes("UNAVAILABLE_TOKEN_ERROR") ||
+    msg.includes("PROXY_ERR") ||
+    msg.includes("failed to process runtime HTTP request")
+  );
+}
+
+function resolveInstalledJiraContextAri(): string | null {
+  try {
+    const maybeGetCtx = (forgeApiMod as { getAppContext?: () => unknown }).getAppContext;
+    if (typeof maybeGetCtx !== "function") return null;
+    const appCtx = maybeGetCtx() as {
+      installation?: {
+        contexts?: readonly { toString?: () => string; cloudId?: string }[];
+      };
+    };
+    for (const ctx of appCtx?.installation?.contexts ?? []) {
+      const str = typeof ctx?.toString === "function" ? ctx.toString() : "";
+      if (str.includes(":jira:")) {
+        return str;
+      }
+      if (ctx?.cloudId) {
+        return `ari:cloud:jira::site/${ctx.cloudId}`;
+      }
+    }
+  } catch {
+    // Non-Forge test environment
+  }
+  return null;
+}
 
 interface JiraIssueRestResponse {
   readonly id: string;
@@ -145,9 +182,66 @@ function buildAuditCommentAdf(markdownText: string): Record<string, unknown> {
 
 /**
  * Jira Cloud REST v3 gateway using official `@forge/api` endpoints.
- * Preserves 100% `Runs on Atlassian` eligibility (zero external egress).
+ * Preserves 100% `Runs on Atlassian` eligibility (zero external egress) and automatically
+ * resolves multi-context Space/MCP invocations (`withContext` + `asUser` fallback) when
+ * Forge's runtime proxy returns `UNAVAILABLE_TOKEN_ERROR` on contextless `asApp()`.
  */
 export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
+  private async requestJiraResilient(
+    path: ReturnType<typeof route>,
+    init?: ForgeRequestInit
+  ): Promise<ForgeResponse> {
+    let primaryErr: unknown;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await api.asApp().requestJira(path, init);
+      } catch (err) {
+        primaryErr = err;
+        if (!isUnavailableTokenProxyError(err)) {
+          throw err;
+        }
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      }
+    }
+
+    const jiraContextAri = resolveInstalledJiraContextAri();
+    const appClient = api.asApp() as {
+      withContext?: (ari: string) => {
+        requestJira: (p: ReturnType<typeof route>, i?: ForgeRequestInit) => Promise<ForgeResponse>;
+      };
+    };
+    if (jiraContextAri && typeof appClient.withContext === "function") {
+      try {
+        return await appClient.withContext(jiraContextAri).requestJira(path, init);
+      } catch (err) {
+        if (!isUnavailableTokenProxyError(err)) {
+          throw err;
+        }
+      }
+    }
+
+    try {
+      return await api.asUser().requestJira(path, init);
+    } catch (userErr) {
+      const userClient = api.asUser() as {
+        withContext?: (ari: string) => {
+          requestJira: (p: ReturnType<typeof route>, i?: ForgeRequestInit) => Promise<ForgeResponse>;
+        };
+      };
+      if (jiraContextAri && typeof userClient.withContext === "function") {
+        try {
+          return await userClient.withContext(jiraContextAri).requestJira(path, init);
+        } catch {
+          throw primaryErr ?? userErr;
+        }
+      }
+      throw primaryErr ?? userErr;
+    }
+  }
+
   public async fetchLiveIssue(issueId: string): Promise<LiveJiraIssueProjection> {
     const full = await this.fetchLiveIssueByKeyOrId(issueId);
     const { projectKey: _ignored, ...projection } = full;
@@ -157,12 +251,10 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
   public async fetchLiveIssueByKeyOrId(
     issueKeyOrId: string
   ): Promise<LiveJiraIssueProjection & { readonly projectKey: string }> {
-    const res = await api
-      .asApp()
-      .requestJira(
-        route`/rest/api/3/issue/${issueKeyOrId}?fields=summary,description,status,resolution,updated,project`,
-        { headers: { Accept: "application/json" } }
-      );
+    const res = await this.requestJiraResilient(
+      route`/rest/api/3/issue/${issueKeyOrId}?fields=summary,description,status,resolution,updated,project`,
+      { headers: { Accept: "application/json" } }
+    );
 
     if (!res.ok) {
       throw new Error(`Jira REST fetch failed for issue "${issueKeyOrId}": HTTP ${res.status}`);
@@ -191,11 +283,12 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     requiredRoles: readonly string[],
     candidateAccountIds: readonly string[] = []
   ): Promise<Record<string, readonly string[]>> {
-    const rolesRes = await api
-      .asApp()
-      .requestJira(route`/rest/api/3/project/${projectKey}/role`, {
+    const rolesRes = await this.requestJiraResilient(
+      route`/rest/api/3/project/${projectKey}/role`,
+      {
         headers: { Accept: "application/json" }
-      });
+      }
+    );
 
     if (!rolesRes.ok) {
       throw new Error(
@@ -226,11 +319,12 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
         continue;
       }
       const roleId = match[1];
-      const detailRes = await api
-        .asApp()
-        .requestJira(route`/rest/api/3/project/${projectKey}/role/${roleId}`, {
+      const detailRes = await this.requestJiraResilient(
+        route`/rest/api/3/project/${projectKey}/role/${roleId}`,
+        {
           headers: { Accept: "application/json" }
-        });
+        }
+      );
 
       if (!detailRes.ok) {
         continue;
@@ -320,7 +414,7 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     }[] = [];
 
     for (const spec of params.specs) {
-      const createRes = await api.asApp().requestJira(route`/rest/api/3/issue`, {
+      const createRes = await this.requestJiraResilient(route`/rest/api/3/issue`, {
         method: "POST",
         headers: {
           Accept: "application/json",
@@ -364,7 +458,7 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
 
       if (linkTypeName && params.ecoIssueKey) {
         try {
-          await api.asApp().requestJira(route`/rest/api/3/issueLink`, {
+          await this.requestJiraResilient(route`/rest/api/3/issueLink`, {
             method: "POST",
             headers: {
               Accept: "application/json",
@@ -395,9 +489,9 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     readonly issueIdOrKey: string;
     readonly markdownText: string;
   }): Promise<{ readonly commentId: string }> {
-    const res = await api
-      .asApp()
-      .requestJira(route`/rest/api/3/issue/${params.issueIdOrKey}/comment`, {
+    const res = await this.requestJiraResilient(
+      route`/rest/api/3/issue/${params.issueIdOrKey}/comment`,
+      {
         method: "POST",
         headers: {
           Accept: "application/json",
@@ -406,7 +500,8 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
         body: JSON.stringify({
           body: buildAuditCommentAdf(params.markdownText)
         })
-      });
+      }
+    );
 
     if (!res.ok) {
       const errText = await res.text();
@@ -452,12 +547,12 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     if (callerAccountId) {
       const groups = await this.fetchUserGroupsSafe(callerAccountId);
       diagnostics.push(
-        `asApp(/rest/api/3/user/groups): ${groups.length} group(s) resolved for caller`
+        `resilient(/rest/api/3/user/groups): ${groups.length} group(s) resolved for caller`
       );
     }
 
     try {
-      const infoRes = await api.asApp().requestJira(route`/rest/api/3/serverInfo`, {
+      const infoRes = await this.requestJiraResilient(route`/rest/api/3/serverInfo`, {
         headers: { Accept: "application/json" }
       });
       if (infoRes.ok) {
@@ -465,14 +560,14 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
         jiraServerBaseUrl = info.baseUrl ?? null;
         jiraDeploymentType = info.deploymentType ?? null;
         diagnostics.push(
-          `asApp(/rest/api/3/serverInfo): HTTP 200 (${jiraDeploymentType ?? "unknown"})`
+          `resilient(/rest/api/3/serverInfo): HTTP 200 (${jiraDeploymentType ?? "unknown"})`
         );
       } else {
-        diagnostics.push(`asApp(/rest/api/3/serverInfo): HTTP ${infoRes.status}`);
+        diagnostics.push(`resilient(/rest/api/3/serverInfo): HTTP ${infoRes.status}`);
       }
     } catch (err) {
       diagnostics.push(
-        `asApp(/rest/api/3/serverInfo) error: ${err instanceof Error ? err.message : String(err)}`
+        `resilient(/rest/api/3/serverInfo) error: ${err instanceof Error ? err.message : String(err)}`
       );
     }
 
@@ -489,20 +584,21 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     }
 
     try {
-      const rolesRes = await api
-        .asApp()
-        .requestJira(route`/rest/api/3/project/${params.projectKey}/role`, {
+      const rolesRes = await this.requestJiraResilient(
+        route`/rest/api/3/project/${params.projectKey}/role`,
+        {
           headers: { Accept: "application/json" }
-        });
+        }
+      );
       if (rolesRes.ok) {
         const roleMap = (await rolesRes.json()) as Record<string, string>;
         resolvedRoleCount = Object.keys(roleMap).length;
         diagnostics.push(
-          `asApp(/rest/api/3/project/${params.projectKey}/role): HTTP 200 (${resolvedRoleCount} project roles)`
+          `resilient(/rest/api/3/project/${params.projectKey}/role): HTTP 200 (${resolvedRoleCount} project roles)`
         );
       } else {
         diagnostics.push(
-          `asApp(/rest/api/3/project/${params.projectKey}/role): HTTP ${rolesRes.status}`
+          `resilient(/rest/api/3/project/${params.projectKey}/role): HTTP ${rolesRes.status}`
         );
       }
     } catch (err) {
@@ -528,11 +624,12 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
 
   private async fetchUserGroupsSafe(accountId: string): Promise<readonly JiraUserGroupItem[]> {
     try {
-      const res = await api
-        .asApp()
-        .requestJira(route`/rest/api/3/user/groups?accountId=${accountId}`, {
+      const res = await this.requestJiraResilient(
+        route`/rest/api/3/user/groups?accountId=${accountId}`,
+        {
           headers: { Accept: "application/json" }
-        });
+        }
+      );
       if (!res.ok) {
         return [];
       }
@@ -544,11 +641,9 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
   }
 
   private async resolveStandardIssueTypeId(projectKey: string): Promise<string> {
-    const projRes = await api
-      .asApp()
-      .requestJira(route`/rest/api/3/project/${projectKey}`, {
-        headers: { Accept: "application/json" }
-      });
+    const projRes = await this.requestJiraResilient(route`/rest/api/3/project/${projectKey}`, {
+      headers: { Accept: "application/json" }
+    });
 
     if (!projRes.ok) {
       throw new Error(
@@ -570,11 +665,12 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
   }
 
   private async transitionIssueToDoneCategory(issueId: string): Promise<void> {
-    const transRes = await api
-      .asApp()
-      .requestJira(route`/rest/api/3/issue/${issueId}/transitions`, {
+    const transRes = await this.requestJiraResilient(
+      route`/rest/api/3/issue/${issueId}/transitions`,
+      {
         headers: { Accept: "application/json" }
-      });
+      }
+    );
 
     if (!transRes.ok) {
       return;
@@ -588,7 +684,7 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       return;
     }
 
-    await api.asApp().requestJira(route`/rest/api/3/issue/${issueId}/transitions`, {
+    await this.requestJiraResilient(route`/rest/api/3/issue/${issueId}/transitions`, {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -602,7 +698,7 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
 
   private async resolveDefaultLinkTypeName(): Promise<string | null> {
     try {
-      const res = await api.asApp().requestJira(route`/rest/api/3/issueLinkType`, {
+      const res = await this.requestJiraResilient(route`/rest/api/3/issueLinkType`, {
         headers: { Accept: "application/json" }
       });
       if (!res.ok) return null;

@@ -1085,14 +1085,25 @@ export class LineLockService {
         rawWs
       );
 
-      const { evaluation, evidenceIntegrity, baselineSummary } =
-        await this.evaluateWorkspaceWithIntegrity(
+      let evaluated;
+      try {
+        evaluated = await this.evaluateWorkspaceWithIntegrity(
           targetProjectKey,
           ws,
           undefined,
           undefined,
           params.callerAccountId
         );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("HTTP 404")) {
+          // Skip orphaned SQL workspaces whose Jira work item was permanently deleted
+          continue;
+        }
+        throw err;
+      }
+
+      const { evaluation, evidenceIntegrity, baselineSummary } = evaluated;
 
       if (evaluation.gateState === "RELEASE_TRANSITIONED_VERIFIED") {
         verifiedReleasedCount++;

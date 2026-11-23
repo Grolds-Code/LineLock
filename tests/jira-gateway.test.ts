@@ -132,9 +132,23 @@ vi.mock("@forge/api", () => {
     return { ok: false, status: 404, text: async () => "not found", json: async () => ({}) };
   });
 
+  let simulateAsAppUnavailableToken = false;
+
   return {
+    __setSimulateAsAppUnavailableToken: (v: boolean) => {
+      simulateAsAppUnavailableToken = v;
+    },
     default: {
-      asApp: () => ({ requestJira: mockRequestJira }),
+      asApp: () => ({
+        requestJira: async (pathObj: { value?: string } | string) => {
+          if (simulateAsAppUnavailableToken) {
+            throw new Error(
+              "PROXY_ERR: Forge platform failed to process runtime HTTP request - 500 - UNAVAILABLE_TOKEN_ERROR"
+            );
+          }
+          return mockRequestJira(pathObj);
+        }
+      }),
       asUser: () => ({ requestJira: mockRequestJira })
     },
     route: (strings: TemplateStringsArray, ...values: unknown[]) => ({
@@ -143,6 +157,7 @@ vi.mock("@forge/api", () => {
   };
 });
 
+import * as mockedForgeApi from "@forge/api";
 import { ForgeJiraPlatformGateway } from "../src/forge/jiraGateway";
 
 describe("ForgeJiraPlatformGateway — @forge/api REST Contract", () => {
@@ -179,5 +194,25 @@ describe("ForgeJiraPlatformGateway — @forge/api REST Contract", () => {
       markdownText: "# Audit Record\nVerified."
     });
     expect(commentRes.commentId).toBe("77881");
+  });
+
+  it("automatically recovers from Space/MCP asApp UNAVAILABLE_TOKEN_ERROR via asUser fallback", async () => {
+    const ctl = mockedForgeApi as unknown as {
+      __setSimulateAsAppUnavailableToken: (v: boolean) => void;
+    };
+    ctl.__setSimulateAsAppUnavailableToken(true);
+    try {
+      const gateway = new ForgeJiraPlatformGateway();
+      const issue = await gateway.fetchLiveIssue("20204");
+      expect(issue.issueKey).toBe("ECO-204");
+      const roles = await gateway.fetchProjectRoleMembers(
+        "ECO",
+        ["Administrators"],
+        ["acct-group-admin-judge"]
+      );
+      expect(roles["Administrators"]).toEqual(["acct-group-admin-judge"]);
+    } finally {
+      ctl.__setSimulateAsAppUnavailableToken(false);
+    }
   });
 });
