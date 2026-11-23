@@ -1,0 +1,24 @@
+name: Regulated Industry Template / Feature Request
+description: Propose a new regulated hardware domain template, carry-forward predicate operator, or PLM/QMS import adapter
+title: "[Enhancement]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Target Regulated Industry Domain
+      options:
+        - "Automotive / EV Powertrain (ISO 26262 / LV124)"
+        - "Medical Devices (IEC 60601 / ISO 14971 / FDA 21 CFR Part 820)"
+        - "Aerospace & Defense (RTCA DO-160G / ARP4754A / DO-254)"
+        - "Semiconductor / Industrial Robotics / Energy Grid"
+        - "Core Verification Engine / Atlassian Platform Integration"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Engineering Problem & Proposed Capability
+      description: Describe the effectivity, operating-envelope, or governance workflow this enhancement addresses.
+    validations:
+      required: true

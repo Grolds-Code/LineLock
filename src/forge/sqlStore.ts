@@ -275,6 +275,35 @@ export class ForgeSqlCasStore implements VerificationStore {
     return Boolean(parsed.registeredEvidenceIssueIds?.includes(issueId));
   }
 
+  public async listEcoWorkspaces(): Promise<readonly StoredEcoWorkspace[]> {
+    const registryKey = "__linelock_evidence_registry__";
+    let res: Result<EcoWorkspaceSqlRow>;
+    try {
+      res = await this.sqlClient
+        .prepare<EcoWorkspaceSqlRow>(
+          "SELECT eco_issue_id, revision_seq, approval_generation, updated_at_epoch_ms, payload_json FROM linelock_eco_workspaces WHERE eco_issue_id <> ? ORDER BY updated_at_epoch_ms DESC"
+        )
+        .bindParams(registryKey)
+        .execute();
+    } catch (err) {
+      this.rethrowIfNotProvisioned(err);
+      throw err;
+    }
+
+    const out: StoredEcoWorkspace[] = [];
+    for (const row of res.rows) {
+      if (!row || row.eco_issue_id === registryKey) continue;
+      const payload = JSON.parse(row.payload_json) as PersistedPayload;
+      out.push({
+        ecoIssueId: row.eco_issue_id,
+        revisionSeq: parseBigIntNumber(row.revision_seq, "revision_seq"),
+        updatedAtEpochMs: parseBigIntNumber(row.updated_at_epoch_ms, "updated_at_epoch_ms"),
+        ...payload
+      });
+    }
+    return out;
+  }
+
   private rethrowIfNotProvisioned(err: unknown): void {
     if (err instanceof ForgeSQLAPIError && err.code === errorCodes.APP_NOT_ENABLED) {
       throw new ProvisioningNotReadyError(
@@ -433,6 +462,16 @@ export class SimulatedTiDbSqlClient implements ForgeSqlClientLike {
       const ecoId = String(params[0]);
       const row = this.ecoWorkspaces.get(ecoId);
       return { rows: row ? [{ ...row }] : [] } as unknown as Result<DataType>;
+    }
+
+    if (/^SELECT\s+eco_issue_id,\s*revision_seq,\s*approval_generation,\s*updated_at_epoch_ms,\s*payload_json\s+FROM\s+linelock_eco_workspaces\s+WHERE\s+eco_issue_id\s*<>\s*\?\s+ORDER\s+BY\s+updated_at_epoch_ms\s+DESC$/i.test(normalized)) {
+      this.assertTableExists("linelock_eco_workspaces");
+      const excludedId = String(params[0]);
+      const rows = [...this.ecoWorkspaces.values()]
+        .filter((r) => r.eco_issue_id !== excludedId)
+        .sort((a, b) => Number(b.updated_at_epoch_ms) - Number(a.updated_at_epoch_ms))
+        .map((r) => ({ ...r }));
+      return { rows } as unknown as Result<DataType>;
     }
 
     if (/^INSERT\s+INTO\s+linelock_eco_workspaces\b/i.test(normalized)) {

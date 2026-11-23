@@ -3,14 +3,19 @@ import type {
 } from "../core/baselines";
 import type {
   ChangeOperation,
+  EcoGateState,
   EcoMetadata,
   FamilyCatalog,
   FinalizedReleaseReceipt,
+  ItemRevision,
   LiveJiraIssueProjection,
   PendingTransitionIntent,
   RoleAttestation,
   VerificationEvaluation
 } from "../core/types";
+import type { IndustryTemplateId } from "../scenarios/industryTemplates";
+
+export type { IndustryTemplateId };
 
 export type ProvisioningState =
   | "UNPROVISIONED"
@@ -43,6 +48,7 @@ export interface StoredEcoWorkspace {
 
 export interface VerificationStore {
   getEcoWorkspace(ecoIssueId: string): Promise<StoredEcoWorkspace | null>;
+  listEcoWorkspaces?(): Promise<readonly StoredEcoWorkspace[]>;
   insertInitialEcoWorkspace(
     workspace: Omit<StoredEcoWorkspace, "revisionSeq">
   ): Promise<StoredEcoWorkspace>;
@@ -119,6 +125,14 @@ export interface LiveEvidenceIntegrityRow {
   readonly hashMatches: boolean;
 }
 
+export interface BaselineTotalsSummary {
+  readonly b0Supported: number;
+  readonly b1Supported: number;
+  readonly b2Supported: number;
+  readonly linelockSupported: number;
+  readonly totalSliceObligations: number;
+}
+
 export interface EcoWorkspaceView {
   readonly callerAccountId?: string;
   readonly provisioning: ProvisioningStatusReport;
@@ -126,6 +140,7 @@ export interface EcoWorkspaceView {
   readonly evaluation: VerificationEvaluation | null;
   readonly evidenceIntegrity?: readonly LiveEvidenceIntegrityRow[];
   readonly releaseAssuranceMarkdown?: string;
+  readonly baselineSummary?: BaselineTotalsSummary;
 }
 
 export type ScenarioPresetId =
@@ -176,6 +191,67 @@ export interface CounterfactualSimulationResult {
     readonly b1: readonly BaselineSliceObligationResult[];
     readonly b2: readonly BaselineSliceObligationResult[];
   };
+}
+
+export interface CustomComponentSubstitutionRequest {
+  readonly partNumber: string;
+  readonly revision: string;
+  readonly title: string;
+  readonly specStatus: ItemRevision["specStatus"];
+  readonly targetSlotPath: string;
+  readonly primaryNumericAttrKey: string;
+  readonly primaryNumericValue: number;
+  readonly primaryNumericScale: number;
+  readonly primaryNumericUnit: string;
+  readonly secondaryEnumAttrKey?: string;
+  readonly secondaryEnumValue?: string;
+  readonly targetVariants: "ALL" | readonly string[];
+  readonly serialFrom: number;
+  readonly serialTo?: number | null;
+}
+
+export interface BindJiraEvidenceRequest {
+  readonly evidenceId: string;
+  readonly jiraIssueKeyOrId: string;
+}
+
+export interface FleetEcoSummaryRow {
+  readonly ecoIssueId: string;
+  readonly ecoIssueKey: string;
+  readonly familyId: string;
+  readonly gateState: EcoGateState;
+  readonly transitionAllowed: boolean;
+  readonly snapshotSha256: string;
+  readonly approvalGeneration: number;
+  readonly revisionSeq: number;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly sliceCount: number;
+  readonly supportedObligations: number;
+  readonly totalObligations: number;
+  readonly evidencePinHealthyCount: number;
+  readonly totalEvidenceCount: number;
+  readonly updatedAtEpochMs: number;
+}
+
+export interface ProjectFleetOverview {
+  readonly projectKey: string;
+  readonly provisioning: ProvisioningStatusReport;
+  readonly evaluatedAtEpochMs: number;
+  readonly totalEcos: number;
+  readonly verifiedReleasedCount: number;
+  readonly readyCount: number;
+  readonly awaitingSignoffCount: number;
+  readonly blockedCount: number;
+  readonly driftAlertCount: number;
+  readonly verdictDistribution: {
+    readonly supportedAsTested: number;
+    readonly supportedByRule: number;
+    readonly invalidated: number;
+    readonly indeterminate: number;
+  };
+  readonly baselineComparisonTotals: BaselineTotalsSummary;
+  readonly ecos: readonly FleetEcoSummaryRow[];
 }
 
 export class ConcurrentModificationError extends Error {

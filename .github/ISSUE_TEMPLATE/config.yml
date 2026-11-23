@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security & Trust-Boundary Policy
+    url: https://github.com/Grolds-Code/LineLock/blob/main/SECURITY.md
+    about: Review LineLock's Strong Kleene K3, Forge SQL CAS, and Runs on Atlassian zero-egress guarantees.
+  - name: Setup & Jira Workflow Troubleshooting
+    url: https://github.com/Grolds-Code/LineLock/blob/main/SUPPORT.md
+    about: Quick answers for Company-managed workflow validators, Forge SQL cold provisioning, and RBAC roles.

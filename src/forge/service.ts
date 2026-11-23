@@ -8,14 +8,17 @@ import {
 import { computePinnedIssueStateHash } from "../core/canonical";
 import { buildSerialScopedSubstitutionOps } from "../core/intervals";
 import {
+  enumVal,
   qty,
   type ChangeOperation,
   type EcoMetadata,
   type FamilyCatalog,
   type FinalizedReleaseReceipt,
+  type ItemRevision,
   type LiveJiraIssueProjection,
   type PendingTransitionIntent,
   type RoleAttestation,
+  type ScalarValue,
   type VerificationEvaluation,
   type VerificationInput,
   type VerificationPolicy
@@ -23,23 +26,32 @@ import {
 import { verifyEngineeringChange } from "../core/verifier";
 import {
   buildHeliosCapRevCSubstitution,
-  createHeliosCatalog,
-  createHeliosDefaultEco,
-  createHeliosLiveIssues
+  createHeliosDefaultEco
 } from "../scenarios/heliosBatteryPack";
+import {
+  buildFlagshipSubstitutionForCatalog,
+  inferScopedSafeVariantForCatalog,
+  instantiateIndustryTemplate,
+  type IndustryTemplateId
+} from "../scenarios/industryTemplates";
 import {
   AuthorizationError,
   ConcurrentModificationError,
   ProvisioningNotReadyError,
   StaleGenerationError,
   StaleSnapshotError,
+  type BaselineTotalsSummary,
+  type BindJiraEvidenceRequest,
   type ConnectivityProbeResult,
   type CounterfactualRequest,
   type CounterfactualSimulationResult,
+  type CustomComponentSubstitutionRequest,
   type EcoWorkspaceView,
+  type FleetEcoSummaryRow,
   type GovernancePolicyMode,
   type JiraPlatformGateway,
   type LiveEvidenceIntegrityRow,
+  type ProjectFleetOverview,
   type ProvisioningStatusReport,
   type ScenarioPresetId,
   type StoredEcoWorkspace,
@@ -139,13 +151,14 @@ export class LineLockService {
       workspace
     );
 
-    const { evaluation, evidenceIntegrity } = await this.evaluateWorkspaceWithIntegrity(
-      params.projectKey,
-      workspace,
-      undefined,
-      undefined,
-      params.callerAccountId
-    );
+    const { evaluation, evidenceIntegrity, baselineSummary } =
+      await this.evaluateWorkspaceWithIntegrity(
+        params.projectKey,
+        workspace,
+        undefined,
+        undefined,
+        params.callerAccountId
+      );
     const releaseAssuranceMarkdown = buildReleaseAssuranceMarkdown({
       catalog: workspace.catalog,
       eco: workspace.eco,
@@ -158,7 +171,8 @@ export class LineLockService {
       workspace,
       evaluation,
       evidenceIntegrity,
-      releaseAssuranceMarkdown
+      releaseAssuranceMarkdown,
+      baselineSummary
     };
   }
 
@@ -166,6 +180,7 @@ export class LineLockService {
     readonly ecoIssueId: string;
     readonly ecoIssueKey: string;
     readonly callerAccountId: string;
+    readonly templateId?: IndustryTemplateId;
     readonly catalog?: FamilyCatalog;
   }): Promise<StoredEcoWorkspace> {
     await this.ensureProvisionedOrThrow();
@@ -177,7 +192,9 @@ export class LineLockService {
 
     const liveEco = await this.jira.fetchLiveIssue(params.ecoIssueId);
     const defaultEco = createHeliosDefaultEco();
-    const catalog = params.catalog ?? createHeliosCatalog(createHeliosLiveIssues());
+    const catalog =
+      params.catalog ??
+      instantiateIndustryTemplate(params.templateId ?? "AUTOMOTIVE_EV_HELIOS").catalog;
 
     const eco: EcoMetadata = {
       ...defaultEco,
@@ -207,20 +224,23 @@ export class LineLockService {
    * Creates 6 real Jira verification work items in `projectKey` (`POST /rest/api/3/issue`),
    * transitions each to Done, links each to `ecoIssueKey`, and pins their real live SHA-256
    * content hashes into the ECO workspace in Forge SQL TiDB (via INSERT or CAS UPDATE).
+   * Supports Automotive EV, MedTech Class III IEC 60601, and Aerospace DO-160G templates.
    */
   public async provisionLiveJiraWorkspace(params: {
     readonly projectKey: string;
     readonly ecoIssueId: string;
     readonly ecoIssueKey: string;
     readonly callerAccountId: string;
+    readonly templateId?: IndustryTemplateId;
   }): Promise<EcoWorkspaceView> {
     await this.ensureProvisionedOrThrow();
 
     const liveEco = await this.jira.fetchLiveIssue(params.ecoIssueId);
     const resolvedEcoKey = params.ecoIssueKey || liveEco.issueKey;
 
-    const referenceIssues = createHeliosLiveIssues();
-    const templateCatalog = createHeliosCatalog(referenceIssues);
+    const { referenceIssues, catalog: templateCatalog } = instantiateIndustryTemplate(
+      params.templateId ?? "AUTOMOTIVE_EV_HELIOS"
+    );
 
     const specs: VerificationIssueSeedSpec[] = templateCatalog.evidenceRecords.map((ev) => {
       const refIssue = referenceIssues[ev.jiraIssueId];
@@ -487,10 +507,23 @@ export class LineLockService {
     const liveEco = await this.jira.fetchLiveIssue(params.ecoIssueId);
     const nextPolicyVersion = ws.catalog.policy.policyVersion + 1;
 
+    const isMedTech = ws.catalog.familyId.startsWith("PULSEGUARD");
+    const isAero = ws.catalog.familyId.startsWith("AEGIS");
+    const prodPolicyId = isMedTech
+      ? "POL-MEDTECH-60601"
+      : isAero
+        ? "POL-AERO-DO160G"
+        : "POL-HELIOS-2026";
+    const soloPolicyId = isMedTech
+      ? "POL-MEDTECH-SOLO-EVALUATOR"
+      : isAero
+        ? "POL-AERO-SOLO-EVALUATOR"
+        : "POL-HELIOS-SOLO-EVALUATOR";
+
     const nextPolicy: VerificationPolicy =
       params.mode === "DEMO_SOLO_ADMIN"
         ? {
-            policyId: "POL-HELIOS-SOLO-EVALUATOR",
+            policyId: soloPolicyId,
             policyVersion: nextPolicyVersion,
             requiredAttestationRoles: ["Administrators"],
             carryForwardDispositionRole: "Administrators",
@@ -498,7 +531,7 @@ export class LineLockService {
             allowRuleBasedCarryForward: true
           }
         : {
-            policyId: "POL-HELIOS-2026",
+            policyId: prodPolicyId,
             policyVersion: nextPolicyVersion,
             requiredAttestationRoles: ["Lead Engineers", "Quality Approvers"],
             carryForwardDispositionRole: "Power Electronics Disposition Authority",
@@ -754,6 +787,393 @@ export class LineLockService {
     });
 
     return { commentId, view };
+  }
+
+  /**
+   * Interactive Custom Component & Serial-Effectivity Substitution Studio:
+   * Registers an engineer-defined ItemRevision (`APPROVED` or `DRAFT`) with typed quantitative
+   * and enumerated attributes in the workspace catalog and commits serial-scoped BOM substitution
+   * operations via Forge SQL CAS + monotonic `approvalGeneration` increment.
+   */
+  public async authorCustomComponentSubstitution(params: {
+    readonly projectKey: string;
+    readonly ecoIssueId: string;
+    readonly expectedRevisionSeq: number;
+    readonly callerAccountId: string;
+    readonly request: CustomComponentSubstitutionRequest;
+  }): Promise<EcoWorkspaceView> {
+    await this.ensureProvisionedOrThrow();
+
+    const ws = await this.mustLoadWorkspace(params.ecoIssueId);
+    if (ws.revisionSeq !== params.expectedRevisionSeq) {
+      throw new ConcurrentModificationError(
+        `Stale workspace revisionSeq ${params.expectedRevisionSeq}; stored revisionSeq is ${ws.revisionSeq}.`
+      );
+    }
+
+    const req = params.request;
+    const partNumber = req.partNumber.trim();
+    const revision = req.revision.trim();
+    const title = req.title.trim() || `${partNumber} Rev ${revision}`;
+    if (!partNumber || !revision) {
+      throw new Error("Both partNumber and revision are required to author a custom component.");
+    }
+
+    const { parentItemRevId, slotKey, baselineChildItemRev } = this.resolveBaselineSlotEdge(
+      ws.catalog,
+      req.targetSlotPath
+    );
+
+    const mergedAttributes: Record<string, ScalarValue> = {
+      ...(baselineChildItemRev?.attributes ?? {})
+    };
+    const primaryKey = req.primaryNumericAttrKey.trim();
+    const primaryUnit = req.primaryNumericUnit.trim();
+    if (!primaryKey || !primaryUnit || !Number.isFinite(req.primaryNumericValue)) {
+      throw new Error(
+        "Valid primaryNumericAttrKey, primaryNumericValue, and primaryNumericUnit are required."
+      );
+    }
+    const scale = Number.isFinite(req.primaryNumericScale)
+      ? Math.trunc(req.primaryNumericScale)
+      : 0;
+    mergedAttributes[primaryKey] = qty(
+      Math.trunc(req.primaryNumericValue),
+      scale,
+      primaryUnit
+    );
+
+    if (req.secondaryEnumAttrKey?.trim() && req.secondaryEnumValue?.trim()) {
+      mergedAttributes[req.secondaryEnumAttrKey.trim()] = enumVal(
+        req.secondaryEnumValue.trim()
+      );
+    }
+
+    const customItemRevId = `${partNumber}@${revision}`;
+    const customItemRev: ItemRevision = {
+      itemRevId: customItemRevId,
+      partNumber,
+      revision,
+      title,
+      itemKind: "COMPONENT",
+      specStatus: req.specStatus,
+      attributes: mergedAttributes
+    };
+
+    const nextItemRevisions = [
+      ...ws.catalog.itemRevisions.filter((r) => r.itemRevId !== customItemRevId),
+      customItemRev
+    ];
+
+    const safeSerialFrom =
+      Number.isSafeInteger(req.serialFrom) && req.serialFrom >= 1000 ? req.serialFrom : 5000;
+    const safeSerialTo =
+      req.serialTo !== undefined &&
+      req.serialTo !== null &&
+      Number.isSafeInteger(req.serialTo) &&
+      req.serialTo > safeSerialFrom
+        ? req.serialTo
+        : null;
+
+    const ops = buildSerialScopedSubstitutionOps({
+      currentEdges: ws.catalog.baselineBomEdges,
+      allVariantIds: ws.catalog.variants.map((v) => v.variantId),
+      parentItemRevId,
+      slotKey,
+      newChildItemRevId: customItemRevId,
+      newEdgeIdPrefix: `E-CUSTOM-${partNumber.replace(/[^A-Za-z0-9]/g, "").slice(0, 8)}`,
+      targetVariants: req.targetVariants,
+      serialFrom: safeSerialFrom,
+      serialTo: safeSerialTo
+    });
+
+    const liveEco = await this.jira.fetchLiveIssue(params.ecoIssueId);
+
+    await this.store.casUpdateEcoWorkspace(ws.revisionSeq, {
+      ecoIssueId: ws.ecoIssueId,
+      updatedAtEpochMs: this.now(),
+      catalog: {
+        ...ws.catalog,
+        itemRevisions: nextItemRevisions
+      },
+      eco: {
+        ...ws.eco,
+        lastEditorAccountId: params.callerAccountId,
+        approvalGeneration: ws.eco.approvalGeneration + 1,
+        liveEcoStatusCategoryKey: liveEco.statusCategoryKey
+      },
+      proposedOperations: ops,
+      attestations: ws.attestations,
+      pendingTransitionIntent: null,
+      finalizedReleaseReceipt: null,
+      unvalidatedDriftDetected:
+        ws.unvalidatedDriftDetected || liveEco.statusCategoryKey.toLowerCase() === "done"
+    });
+
+    return this.getWorkspaceView({
+      projectKey: params.projectKey,
+      ecoIssueId: params.ecoIssueId,
+      callerAccountId: params.callerAccountId
+    });
+  }
+
+  /**
+   * Binds any existing live Jira issue (in `Done` statusCategory) to a governed obligation's
+   * `VerificationEvidence` slot, registers its issue ID for workflow-validator pass-through,
+   * pins its RFC 8785 SHA-256 content hash, and increments `approvalGeneration` via SQL CAS.
+   */
+  public async bindCustomJiraEvidenceTicket(params: {
+    readonly projectKey: string;
+    readonly ecoIssueId: string;
+    readonly expectedRevisionSeq: number;
+    readonly callerAccountId: string;
+    readonly request: BindJiraEvidenceRequest;
+  }): Promise<EcoWorkspaceView> {
+    await this.ensureProvisionedOrThrow();
+
+    const ws = await this.mustLoadWorkspace(params.ecoIssueId);
+    if (ws.revisionSeq !== params.expectedRevisionSeq) {
+      throw new ConcurrentModificationError(
+        `Stale workspace revisionSeq ${params.expectedRevisionSeq}; stored revisionSeq is ${ws.revisionSeq}.`
+      );
+    }
+
+    const targetEvId = params.request.evidenceId.trim();
+    const issueKeyOrId = params.request.jiraIssueKeyOrId.trim();
+    if (!targetEvId || !issueKeyOrId) {
+      throw new Error("Both evidenceId and jiraIssueKeyOrId are required.");
+    }
+
+    const existsInCatalog = ws.catalog.evidenceRecords.some(
+      (ev) => ev.evidenceId === targetEvId
+    );
+    if (!existsInCatalog) {
+      throw new Error(`Evidence slot "${targetEvId}" does not exist in catalog "${ws.catalog.familyId}".`);
+    }
+
+    const targetIssue = await this.jira.fetchLiveIssueByKeyOrId(issueKeyOrId);
+    if (targetIssue.statusCategoryKey.toLowerCase() !== "done") {
+      throw new Error(
+        `Cannot bind Jira issue "${targetIssue.issueKey}" as qualification evidence until its statusCategory is "done" (current: "${targetIssue.statusCategoryKey}").`
+      );
+    }
+
+    if (this.store.registerEvidenceIssueIds) {
+      await this.store.registerEvidenceIssueIds([targetIssue.issueId]);
+    }
+
+    const pinnedHash = computePinnedIssueStateHash(targetIssue);
+    const updatedEvidence = ws.catalog.evidenceRecords.map((ev) =>
+      ev.evidenceId === targetEvId
+        ? {
+            ...ev,
+            jiraIssueId: targetIssue.issueId,
+            jiraIssueKey: targetIssue.issueKey,
+            pinnedIssueStateHash: pinnedHash
+          }
+        : ev
+    );
+
+    const liveEco = await this.jira.fetchLiveIssue(params.ecoIssueId);
+
+    await this.store.casUpdateEcoWorkspace(ws.revisionSeq, {
+      ecoIssueId: ws.ecoIssueId,
+      updatedAtEpochMs: this.now(),
+      catalog: {
+        ...ws.catalog,
+        evidenceRecords: updatedEvidence
+      },
+      eco: {
+        ...ws.eco,
+        lastEditorAccountId: params.callerAccountId,
+        approvalGeneration: ws.eco.approvalGeneration + 1,
+        liveEcoStatusCategoryKey: liveEco.statusCategoryKey
+      },
+      proposedOperations: ws.proposedOperations,
+      attestations: ws.attestations,
+      pendingTransitionIntent: null,
+      finalizedReleaseReceipt: null,
+      unvalidatedDriftDetected:
+        ws.unvalidatedDriftDetected || liveEco.statusCategoryKey.toLowerCase() === "done"
+    });
+
+    return this.getWorkspaceView({
+      projectKey: params.projectKey,
+      ecoIssueId: params.ecoIssueId,
+      callerAccountId: params.callerAccountId
+    });
+  }
+
+  /**
+   * Evaluates all initialized ECO workspaces in a Jira project space against live Jira state,
+   * aggregating fleet gate readiness, Strong Kleene K3 verdict distributions, and B0/B1/B2
+   * industry baseline comparisons for the space-wide `LineLock Fleet Assurance` dashboard & Rovo MCP.
+   */
+  public async getProjectFleetOverview(params: {
+    readonly projectKey: string;
+    readonly callerAccountId?: string;
+  }): Promise<ProjectFleetOverview> {
+    const provisioning = await this.provisioning.inspectStatus();
+    const evaluatedAtEpochMs = this.now();
+
+    if (provisioning.state !== "READY" || !this.store.listEcoWorkspaces) {
+      return {
+        projectKey: params.projectKey,
+        provisioning,
+        evaluatedAtEpochMs,
+        totalEcos: 0,
+        verifiedReleasedCount: 0,
+        readyCount: 0,
+        awaitingSignoffCount: 0,
+        blockedCount: 0,
+        driftAlertCount: 0,
+        verdictDistribution: {
+          supportedAsTested: 0,
+          supportedByRule: 0,
+          invalidated: 0,
+          indeterminate: 0
+        },
+        baselineComparisonTotals: {
+          b0Supported: 0,
+          b1Supported: 0,
+          b2Supported: 0,
+          linelockSupported: 0,
+          totalSliceObligations: 0
+        },
+        ecos: []
+      };
+    }
+
+    const allWorkspaces = await this.store.listEcoWorkspaces();
+    const normalizedProjectKey = params.projectKey.trim().toUpperCase();
+    const matching = allWorkspaces.filter((ws) => {
+      if (!normalizedProjectKey || normalizedProjectKey === "*") return true;
+      const key = ws.eco.ecoJiraKey.trim();
+      if (!key.includes("-")) return true;
+      const prefix = (key.split("-")[0] ?? "").toUpperCase();
+      return prefix === normalizedProjectKey;
+    });
+
+    let verifiedReleasedCount = 0;
+    let readyCount = 0;
+    let awaitingSignoffCount = 0;
+    let blockedCount = 0;
+    let driftAlertCount = 0;
+
+    let supportedAsTested = 0;
+    let supportedByRule = 0;
+    let invalidated = 0;
+    let indeterminate = 0;
+
+    let b0Supported = 0;
+    let b1Supported = 0;
+    let b2Supported = 0;
+    let linelockSupported = 0;
+    let totalSliceObligations = 0;
+
+    const ecoRows: FleetEcoSummaryRow[] = [];
+
+    for (const rawWs of matching) {
+      const targetProjectKey =
+        normalizedProjectKey && normalizedProjectKey !== "*"
+          ? params.projectKey
+          : (rawWs.eco.ecoJiraKey.split("-")[0] ?? "ECO");
+
+      const ws = await this.maybeFinalizePendingTransitionIntent(
+        targetProjectKey,
+        rawWs.ecoIssueId,
+        rawWs
+      );
+
+      const { evaluation, evidenceIntegrity, baselineSummary } =
+        await this.evaluateWorkspaceWithIntegrity(
+          targetProjectKey,
+          ws,
+          undefined,
+          undefined,
+          params.callerAccountId
+        );
+
+      if (evaluation.gateState === "RELEASE_TRANSITIONED_VERIFIED") {
+        verifiedReleasedCount++;
+      } else if (evaluation.gateState === "READY_FOR_RELEASE_TRANSITION") {
+        readyCount++;
+      } else if (evaluation.gateState === "AWAITING_ATTESTATION") {
+        awaitingSignoffCount++;
+      } else {
+        blockedCount++;
+      }
+
+      const healthyPins = evidenceIntegrity.filter(
+        (row) => row.statusIsDone && row.hashMatches
+      ).length;
+      if (
+        evaluation.gateState === "UNVALIDATED_RELEASE_DRIFT" ||
+        healthyPins < evidenceIntegrity.length
+      ) {
+        driftAlertCount++;
+      }
+
+      for (const so of evaluation.sliceObligations) {
+        if (so.status === "SUPPORTED_AS_TESTED") supportedAsTested++;
+        else if (so.status === "SUPPORTED_BY_APPROVED_RULE") supportedByRule++;
+        else if (so.status.startsWith("INVALIDATED_")) invalidated++;
+        else indeterminate++;
+      }
+
+      b0Supported += baselineSummary.b0Supported;
+      b1Supported += baselineSummary.b1Supported;
+      b2Supported += baselineSummary.b2Supported;
+      linelockSupported += baselineSummary.linelockSupported;
+      totalSliceObligations += baselineSummary.totalSliceObligations;
+
+      ecoRows.push({
+        ecoIssueId: ws.ecoIssueId,
+        ecoIssueKey: ws.eco.ecoJiraKey || ws.ecoIssueId,
+        familyId: ws.catalog.familyId,
+        gateState: evaluation.gateState,
+        transitionAllowed: evaluation.transitionAllowed,
+        snapshotSha256: evaluation.snapshotSha256,
+        approvalGeneration: ws.eco.approvalGeneration,
+        revisionSeq: ws.revisionSeq,
+        policyId: ws.catalog.policy.policyId,
+        policyVersion: ws.catalog.policy.policyVersion,
+        sliceCount: evaluation.slices.length,
+        supportedObligations: baselineSummary.linelockSupported,
+        totalObligations: evaluation.sliceObligations.length,
+        evidencePinHealthyCount: healthyPins,
+        totalEvidenceCount: evidenceIntegrity.length,
+        updatedAtEpochMs: ws.updatedAtEpochMs
+      });
+    }
+
+    ecoRows.sort((a, b) => b.updatedAtEpochMs - a.updatedAtEpochMs);
+
+    return {
+      projectKey: params.projectKey,
+      provisioning,
+      evaluatedAtEpochMs,
+      totalEcos: ecoRows.length,
+      verifiedReleasedCount,
+      readyCount,
+      awaitingSignoffCount,
+      blockedCount,
+      driftAlertCount,
+      verdictDistribution: {
+        supportedAsTested,
+        supportedByRule,
+        invalidated,
+        indeterminate
+      },
+      baselineComparisonTotals: {
+        b0Supported,
+        b1Supported,
+        b2Supported,
+        linelockSupported,
+        totalSliceObligations
+      },
+      ecos: ecoRows
+    };
   }
 
   public async validateReleaseTransition(params: {
@@ -1015,14 +1435,60 @@ export class LineLockService {
     catalog: FamilyCatalog,
     presetId: ScenarioPresetId
   ): ChangeOperation[] {
+    const isMedTech = catalog.familyId.startsWith("PULSEGUARD");
+    const isAero = catalog.familyId.startsWith("AEGIS");
+    const safeVariantId = inferScopedSafeVariantForCatalog(catalog);
+
     switch (presetId) {
       case "BASELINE":
         return [];
       case "CAP_REV_C_ALL_5000":
+        if (isMedTech || isAero) {
+          return buildFlagshipSubstitutionForCatalog({
+            catalog,
+            targetVariants: "ALL",
+            serialFrom: 5000
+          });
+        }
         return buildHeliosCapRevCSubstitution(catalog, "ALL", 5000);
       case "CAP_REV_C_400V_5000":
+        if (isMedTech || isAero) {
+          return buildFlagshipSubstitutionForCatalog({
+            catalog,
+            targetVariants: [safeVariantId],
+            serialFrom: 5000
+          });
+        }
         return buildHeliosCapRevCSubstitution(catalog, ["VAR_400V"], 5000);
-      case "COLD_SOAK_MINUS_40C":
+      case "COLD_SOAK_MINUS_40C": {
+        if (isMedTech) {
+          const baseVar = catalog.variants.find((v) => v.variantId === "VAR_ADULT_ICU");
+          return [
+            {
+              op: "SET_VARIANT_ENVELOPE",
+              variantId: "VAR_ADULT_ICU",
+              operatingEnvelope: {
+                ...(baseVar?.operatingEnvelope ?? {}),
+                min_ambient: qty(0, 0, "degC"),
+                max_ambient: qty(40, 0, "degC")
+              }
+            }
+          ];
+        }
+        if (isAero) {
+          const baseVar = catalog.variants.find((v) => v.variantId === "VAR_REGIONAL_TURBOPROP");
+          return [
+            {
+              op: "SET_VARIANT_ENVELOPE",
+              variantId: "VAR_REGIONAL_TURBOPROP",
+              operatingEnvelope: {
+                ...(baseVar?.operatingEnvelope ?? {}),
+                min_ambient: qty(-50, 0, "degC"),
+                max_ambient: qty(70, 0, "degC")
+              }
+            }
+          ];
+        }
         return [
           {
             op: "SET_VARIANT_ENVELOPE",
@@ -1035,7 +1501,34 @@ export class LineLockService {
             }
           }
         ];
+      }
       case "SEAL_REV_B_3000":
+        if (isMedTech) {
+          return buildSerialScopedSubstitutionOps({
+            currentEdges: catalog.baselineBomEdges,
+            allVariantIds: catalog.variants.map((v) => v.variantId),
+            parentItemRevId: "PUMP-PULSEGUARD@A",
+            slotKey: "FLUID_SEAL_G1",
+            newChildItemRevId: "TUBE-SIL@B",
+            newEdgeIdPrefix: "E-PRESET-SEAL",
+            targetVariants: [safeVariantId],
+            serialFrom: 3000,
+            serialTo: null
+          });
+        }
+        if (isAero) {
+          return buildSerialScopedSubstitutionOps({
+            currentEdges: catalog.baselineBomEdges,
+            allVariantIds: catalog.variants.map((v) => v.variantId),
+            parentItemRevId: "EHA-AEGIS@A",
+            slotKey: "ALTITUDE_VENT_V1",
+            newChildItemRevId: "VENT-PTFE@B",
+            newEdgeIdPrefix: "E-PRESET-SEAL",
+            targetVariants: [safeVariantId],
+            serialFrom: 3000,
+            serialTo: null
+          });
+        }
         return buildSerialScopedSubstitutionOps({
           currentEdges: catalog.baselineBomEdges,
           allVariantIds: catalog.variants.map((v) => v.variantId),
@@ -1054,19 +1547,27 @@ export class LineLockService {
     catalog: FamilyCatalog,
     req: CounterfactualRequest
   ): ChangeOperation[] {
+    const isMedTech = catalog.familyId.startsWith("PULSEGUARD");
+    const isAero = catalog.familyId.startsWith("AEGIS");
+    const allVariantIds = catalog.variants.map((v) => v.variantId);
+
+    const normalizeVariantId = (vid: string): string => {
+      if (allVariantIds.includes(vid)) return vid;
+      if (vid === "VAR_800V" && allVariantIds[1]) return allVariantIds[1];
+      return inferScopedSafeVariantForCatalog(catalog);
+    };
+
     if (req.kind === "AMBIENT_ENVELOPE_SHIFT") {
-      const targetVar = catalog.variants.find((v) => v.variantId === req.variantId);
-      const baseBusV = targetVar?.operatingEnvelope["bus_voltage"] ?? qty(400, 0, "V");
-      const baseAuxV = targetVar?.operatingEnvelope["aux_rail_voltage"] ?? qty(12, 0, "V");
+      const resolvedVarId = normalizeVariantId(req.variantId);
+      const targetVar = catalog.variants.find((v) => v.variantId === resolvedVarId);
       return [
         {
           op: "SET_VARIANT_ENVELOPE",
-          variantId: req.variantId,
+          variantId: resolvedVarId,
           operatingEnvelope: {
-            bus_voltage: baseBusV,
+            ...(targetVar?.operatingEnvelope ?? {}),
             max_ambient: qty(Math.trunc(req.maxAmbientC), 0, "degC"),
-            min_ambient: qty(Math.trunc(req.minAmbientC), 0, "degC"),
-            aux_rail_voltage: baseAuxV
+            min_ambient: qty(Math.trunc(req.minAmbientC), 0, "degC")
           }
         }
       ];
@@ -1082,10 +1583,21 @@ export class LineLockService {
         ? req.serialTo
         : null;
 
-    const allVariantIds = catalog.variants.map((v) => v.variantId);
+    const normalizedTargets: "ALL" | readonly string[] =
+      req.targetVariants === "ALL"
+        ? "ALL"
+        : req.targetVariants.map((v) => normalizeVariantId(v));
 
     switch (req.kind) {
       case "CAP_REV_C_CUTOVER":
+        if (isMedTech || isAero) {
+          return buildFlagshipSubstitutionForCatalog({
+            catalog,
+            targetVariants: normalizedTargets,
+            serialFrom: safeSerial,
+            serialTo: safeSerialTo
+          });
+        }
         return buildSerialScopedSubstitutionOps({
           currentEdges: catalog.baselineBomEdges,
           allVariantIds,
@@ -1093,11 +1605,24 @@ export class LineLockService {
           slotKey: "DC_LINK_CAP_C14",
           newChildItemRevId: "CAP-1210@C",
           newEdgeIdPrefix: "E-CF-CAPC",
-          targetVariants: req.targetVariants,
+          targetVariants: normalizedTargets,
           serialFrom: safeSerial,
           serialTo: safeSerialTo
         });
       case "CAP_REV_D_DRAFT_CUTOVER":
+        if (isMedTech) {
+          return buildSerialScopedSubstitutionOps({
+            currentEdges: catalog.baselineBomEdges,
+            allVariantIds,
+            parentItemRevId: "PUMP_DRV@A",
+            slotKey: "FLOW_SENSOR_S1",
+            newChildItemRevId: "SENS-MEMS@C_DRAFT",
+            newEdgeIdPrefix: "E-CF-DRAFT",
+            targetVariants: normalizedTargets,
+            serialFrom: safeSerial,
+            serialTo: safeSerialTo
+          });
+        }
         return buildSerialScopedSubstitutionOps({
           currentEdges: catalog.baselineBomEdges,
           allVariantIds,
@@ -1105,7 +1630,7 @@ export class LineLockService {
           slotKey: "DC_LINK_CAP_C14",
           newChildItemRevId: "CAP-1210@D_DRAFT",
           newEdgeIdPrefix: "E-CF-CAPD",
-          targetVariants: req.targetVariants,
+          targetVariants: normalizedTargets,
           serialFrom: safeSerial,
           serialTo: safeSerialTo
         });
@@ -1117,11 +1642,37 @@ export class LineLockService {
           slotKey: "GATE_DRIVER_U3",
           newChildItemRevId: "DRV-ISO@B",
           newEdgeIdPrefix: "E-CF-DRVB",
-          targetVariants: req.targetVariants,
+          targetVariants: normalizedTargets,
           serialFrom: safeSerial,
           serialTo: safeSerialTo
         });
       case "SEAL_REV_B_CUTOVER":
+        if (isMedTech) {
+          return buildSerialScopedSubstitutionOps({
+            currentEdges: catalog.baselineBomEdges,
+            allVariantIds,
+            parentItemRevId: "PUMP-PULSEGUARD@A",
+            slotKey: "FLUID_SEAL_G1",
+            newChildItemRevId: "TUBE-SIL@B",
+            newEdgeIdPrefix: "E-CF-SEAL",
+            targetVariants: normalizedTargets,
+            serialFrom: safeSerial,
+            serialTo: safeSerialTo
+          });
+        }
+        if (isAero) {
+          return buildSerialScopedSubstitutionOps({
+            currentEdges: catalog.baselineBomEdges,
+            allVariantIds,
+            parentItemRevId: "EHA-AEGIS@A",
+            slotKey: "ALTITUDE_VENT_V1",
+            newChildItemRevId: "VENT-PTFE@B",
+            newEdgeIdPrefix: "E-CF-SEAL",
+            targetVariants: normalizedTargets,
+            serialFrom: safeSerial,
+            serialTo: safeSerialTo
+          });
+        }
         return buildSerialScopedSubstitutionOps({
           currentEdges: catalog.baselineBomEdges,
           allVariantIds,
@@ -1129,11 +1680,55 @@ export class LineLockService {
           slotKey: "ENCLOSURE_SEAL_S1",
           newChildItemRevId: "SEAL-EPDM@B",
           newEdgeIdPrefix: "E-CF-SEAL",
-          targetVariants: req.targetVariants,
+          targetVariants: normalizedTargets,
           serialFrom: safeSerial,
           serialTo: safeSerialTo
         });
     }
+  }
+
+  private resolveBaselineSlotEdge(
+    catalog: FamilyCatalog,
+    targetSlotPath: string
+  ): {
+    readonly parentItemRevId: string;
+    readonly slotKey: string;
+    readonly baselineChildItemRev: ItemRevision | undefined;
+  } {
+    const segments = targetSlotPath
+      .trim()
+      .split("/")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (segments.length === 0) {
+      throw new Error("targetSlotPath is required.");
+    }
+
+    let currentParentRevId = catalog.rootAssemblyRevId;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i]!;
+      const edge = catalog.baselineBomEdges.find(
+        (e) => e.parentItemRevId === currentParentRevId && e.slotKey === seg
+      );
+      if (!edge) {
+        throw new Error(
+          `Slot path "${targetSlotPath}" could not be resolved at segment "${seg}" under parent "${currentParentRevId}".`
+        );
+      }
+      if (i === segments.length - 1) {
+        const baselineChildItemRev = catalog.itemRevisions.find(
+          (r) => r.itemRevId === edge.childItemRevId
+        );
+        return {
+          parentItemRevId: edge.parentItemRevId,
+          slotKey: edge.slotKey,
+          baselineChildItemRev
+        };
+      }
+      currentParentRevId = edge.childItemRevId;
+    }
+
+    throw new Error(`Unable to resolve slot path "${targetSlotPath}".`);
   }
 
   private async maybeFinalizePendingTransitionIntent(
@@ -1231,6 +1826,7 @@ export class LineLockService {
   ): Promise<{
     readonly evaluation: VerificationEvaluation;
     readonly evidenceIntegrity: readonly LiveEvidenceIntegrityRow[];
+    readonly baselineSummary: BaselineTotalsSummary;
   }> {
     const { liveEco, trustedRoles, liveIssuesById } = await this.fetchLiveVerificationContext(
       projectKey,
@@ -1241,7 +1837,7 @@ export class LineLockService {
 
     const effectiveStatus = overrideEcoStatusCategoryKey ?? liveEco.statusCategoryKey;
 
-    const evaluation = verifyEngineeringChange({
+    const verInput: VerificationInput = {
       catalog: ws.catalog,
       eco: {
         ...ws.eco,
@@ -1254,7 +1850,20 @@ export class LineLockService {
       pendingTransitionIntent: ws.pendingTransitionIntent,
       finalizedReleaseReceipt: ws.finalizedReleaseReceipt,
       unvalidatedDriftDetected: ws.unvalidatedDriftDetected
-    });
+    };
+
+    const evaluation = verifyEngineeringChange(verInput);
+    const b0 = evaluateB0TimestampStatus(verInput);
+    const b1 = evaluateB1UntypedSuspectGraph(verInput);
+    const b2 = evaluateB2CompetentVersionAndEnvelope(verInput);
+
+    const baselineSummary: BaselineTotalsSummary = {
+      b0Supported: b0.filter((r) => r.verdict === "SUPPORTED").length,
+      b1Supported: b1.filter((r) => r.verdict === "SUPPORTED").length,
+      b2Supported: b2.filter((r) => r.verdict === "SUPPORTED").length,
+      linelockSupported: countSupported(evaluation),
+      totalSliceObligations: evaluation.sliceObligations.length
+    };
 
     const oblCodeById = new Map(ws.catalog.obligations.map((o) => [o.obligationId, o.code]));
     const evidenceIntegrity: LiveEvidenceIntegrityRow[] = ws.catalog.evidenceRecords.map((ev) => {
@@ -1278,7 +1887,7 @@ export class LineLockService {
       };
     });
 
-    return { evaluation, evidenceIntegrity };
+    return { evaluation, evidenceIntegrity, baselineSummary };
   }
 
   private async evaluateWorkspaceAgainstLiveJira(

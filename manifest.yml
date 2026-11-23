@@ -8,6 +8,16 @@ modules:
       title: LineLock Assurance Cockpit
       icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
 
+  jira:projectPage:
+    - key: ll-fleet-page
+      resource: fleet-ui
+      resolver:
+        function: panel-resolver-fn
+      render: native
+      layout: basic
+      title: LineLock Fleet Assurance
+      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+
   jira:workflowValidator:
     - key: ll-release-validator
       name: LineLock Effectivity-Aware Evidence Gate
@@ -17,25 +27,38 @@ modules:
   rovo:agent:
     - key: ll-assurance-agent
       name: LineLock Assurance Analyst
-      description: Read-only engineering evidence verification and counterfactual serial-effectivity analyst backed by LineLock's deterministic Strong Kleene K3 kernel.
+      description: Read-only engineering evidence verification, multi-industry portfolio fleet monitor, and counterfactual serial-effectivity analyst backed by LineLock's deterministic Strong Kleene K3 kernel.
       prompt: >
         You are the LineLock Assurance Analyst, a strictly read-only industrial verification
-        assistant for Engineering Change Orders (ECOs) in Jira. Never claim authority to approve
-        an ECO, override a workflow gate, or evaluate/certify physical product safety or statutory
-        regulatory compliance; always describe LineLock's scope strictly as deterministic
-        verification of recorded engineering evidence and configuration applicability. Always
-        invoke LineLock's deterministic actions (`ll-act-inspect-eco`, `ll-act-sim-cutover`,
-        `ll-act-baselines`) before answering, and cite exact `snapshotSha256`,
-        `approvalGeneration`, `sliceId`, `obligationCode`, `CarryForwardRule` IDs, Strong Kleene
-        K3 truth values (`TRUE`, `FALSE`, `UNKNOWN`), and minimum bounded retest plans.
+        assistant for Engineering Change Orders (ECOs) in Jira across Automotive EV, MedTech
+        IEC 60601, Aerospace DO-160G, and custom hardware families. Never claim authority to
+        approve an ECO, override a workflow gate, or evaluate/certify physical product safety or
+        statutory regulatory compliance; always describe LineLock's scope strictly as
+        deterministic verification of recorded engineering evidence and configuration
+        applicability. Always invoke LineLock's deterministic actions (`ll-act-inspect-eco`,
+        `ll-act-sim-cutover`, `ll-act-baselines`, `ll-act-fleet-status`) before answering, and
+        cite exact `snapshotSha256`, `approvalGeneration`, `sliceId`, `obligationCode`,
+        `CarryForwardRule` IDs, Strong Kleene K3 truth values (`TRUE`, `FALSE`, `UNKNOWN`), and
+        minimum bounded retest plans.
       conversationStarters:
         - Inspect why ECO-1 is currently blocked and list required retests or signoffs
         - Simulate scoping Cap Rev C substitution to 400V packs only from serial 5000 on ECO-1
         - Compare LineLock's verification of ECO-1 against traditional PLM/ALM baselines
+        - Summarize space-wide LineLock Fleet Assurance status across project ECO
       actions:
         - ll-act-inspect-eco
         - ll-act-sim-cutover
         - ll-act-baselines
+        - ll-act-fleet-status
+
+  rovo:mcp:
+    - key: ll-assurance-mcp
+      name: LineLock Verification MCP
+      tools:
+        - ll-act-inspect-eco
+        - ll-act-sim-cutover
+        - ll-act-baselines
+        - ll-act-fleet-status
 
   action:
     - key: ll-act-inspect-eco
@@ -54,7 +77,7 @@ modules:
       name: Simulate Counterfactual Serial Cutover
       function: rovo-sim-fn
       actionVerb: GET
-      description: Runs a strictly read-only counterfactual simulation of substituting CAP-1210 Rev C across a target serial interval on ALL, VAR_400V, or VAR_800V without mutating Forge SQL.
+      description: Runs a strictly read-only counterfactual simulation of flagship component substitution across a target serial interval and variant scope without mutating Forge SQL.
       inputs:
         issueKey:
           title: ECO Jira Issue Key
@@ -65,7 +88,7 @@ modules:
           title: Target Variant Scope
           type: string
           required: false
-          description: Product variant scope to simulate ('VAR_400V', 'VAR_800V', or 'ALL').
+          description: Product variant scope to simulate (e.g. 'VAR_400V', 'VAR_ADULT_ICU', 'VAR_REGIONAL_TURBOPROP', or 'ALL').
         serialFrom:
           title: Serial Cutover Start
           type: integer
@@ -88,6 +111,18 @@ modules:
           type: string
           required: true
           description: Jira issue key of the Engineering Change Order (for example ECO-1).
+
+    - key: ll-act-fleet-status
+      name: Inspect Space-Wide Fleet Assurance Status
+      function: rovo-fleet-fn
+      actionVerb: GET
+      description: Evaluates all initialized ECO workspaces in a Jira project space against live Jira state, aggregating release gate readiness, Strong Kleene K3 verdict distributions, and B0/B1/B2 baseline discrepancies.
+      inputs:
+        projectKey:
+          title: Jira Project Space Key
+          type: string
+          required: true
+          description: Jira project space key to audit across all initialized ECOs (for example ECO).
 
   trigger:
     - key: ll-issue-reconciler
@@ -126,10 +161,14 @@ modules:
       handler: forge/index.rovoSimulateCutoverHandler
     - key: rovo-base-fn
       handler: forge/index.rovoCompareBaselinesHandler
+    - key: rovo-fleet-fn
+      handler: forge/index.rovoFleetOverviewHandler
 
 resources:
   - key: main-ui
     path: src/frontend/index.tsx
+  - key: fleet-ui
+    path: src/frontend/fleetPage.tsx
 
 permissions:
   scopes:

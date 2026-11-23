@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import ForgeReconciler, {
+  BarChart,
   Box,
   Button,
   ButtonGroup,
@@ -10,9 +11,11 @@ import ForgeReconciler, {
   Inline,
   LoadingButton,
   Lozenge,
+  ProgressBar,
   SectionMessage,
   Select,
   Stack,
+  StackBarChart,
   Tab,
   TabList,
   TabPanel,
@@ -26,6 +29,8 @@ import ForgeReconciler, {
 import { invoke } from "@forge/bridge";
 import type {
   EcoGateState,
+  FamilyCatalog,
+  ItemRevision,
   PredicateTraceNode,
   SerialInterval,
   SliceObligationEvaluation,
@@ -33,13 +38,20 @@ import type {
   TruthValue
 } from "../core/types";
 import type {
+  BindJiraEvidenceRequest,
   ConnectivityProbeResult,
   CounterfactualRequest,
   CounterfactualSimulationResult,
+  CustomComponentSubstitutionRequest,
   EcoWorkspaceView,
   GovernancePolicyMode,
   ScenarioPresetId
 } from "../forge/ports";
+import {
+  INDUSTRY_TEMPLATES,
+  type IndustryTemplateDescriptor,
+  type IndustryTemplateId
+} from "../scenarios/templateMetadata";
 
 function unwrapInvoke<T>(raw: T | { readonly body: T }): T {
   if (raw && typeof raw === "object" && "body" in raw) {
@@ -161,6 +173,81 @@ function extractEventString(ev: unknown): string {
   return "";
 }
 
+function inferTemplateFromCatalog(catalog: FamilyCatalog | undefined): IndustryTemplateDescriptor {
+  if (catalog?.familyId.startsWith("PULSEGUARD")) {
+    return INDUSTRY_TEMPLATES[1]!;
+  }
+  if (catalog?.familyId.startsWith("AEGIS")) {
+    return INDUSTRY_TEMPLATES[2]!;
+  }
+  return INDUSTRY_TEMPLATES[0]!;
+}
+
+function collectGovernedLeafSlots(catalog: FamilyCatalog | undefined): string[] {
+  if (!catalog) return ["HV_INV/DC_LINK_CAP_C14"];
+  const set = new Set<string>();
+  for (const obl of catalog.obligations) {
+    for (const sp of obl.governedSlotPaths) {
+      set.add(sp);
+    }
+  }
+  return [...set];
+}
+
+function defaultStudioFieldsForCatalog(catalog: FamilyCatalog | undefined): {
+  readonly slotPath: string;
+  readonly partNumber: string;
+  readonly revision: string;
+  readonly title: string;
+  readonly attrKey: string;
+  readonly attrVal: string;
+  readonly attrScale: string;
+  readonly attrUnit: string;
+  readonly enumKey: string;
+  readonly enumVal: string;
+} {
+  if (catalog?.familyId.startsWith("PULSEGUARD")) {
+    return {
+      slotPath: "PUMP_DRV/FLOW_SENSOR_S1",
+      partNumber: "SENS-MEMS-FLOW",
+      revision: "D",
+      title: "Laser-Trimmed NICU Micro-Bolus Sensor (+/-1.2% mL/h)",
+      attrKey: "flow_err_mdir",
+      attrVal: "12",
+      attrScale: "-1",
+      attrUnit: "pct",
+      enumKey: "",
+      enumVal: ""
+    };
+  }
+  if (catalog?.familyId.startsWith("AEGIS")) {
+    return {
+      slotPath: "SERVO_LOOP/RESOLVER_R1",
+      partNumber: "RSLV-HAR-21",
+      revision: "C",
+      title: "Cryo-Wound Brushless Position Resolver (-60C Stratospheric)",
+      attrKey: "min_temp_rated",
+      attrVal: "-60",
+      attrScale: "0",
+      attrUnit: "degC",
+      enumKey: "qual_grade",
+      enumVal: "DO160G_CAT_A2"
+    };
+  }
+  return {
+    slotPath: "HV_INV/DC_LINK_CAP_C14",
+    partNumber: "CAP-1210-HV",
+    revision: "E",
+    title: "1210 MLCC Capacitor 1100V C0G (400V & 800V Qualified)",
+    attrKey: "v_rated",
+    attrVal: "1100",
+    attrScale: "0",
+    attrUnit: "V",
+    enumKey: "dielectric",
+    enumVal: "C0G"
+  };
+}
+
 const cardBoxStyle = xcss({
   backgroundColor: "color.background.neutral.subtle",
   borderColor: "color.border",
@@ -228,12 +315,16 @@ const LineLockAssuranceCockpit: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
+  // Industry Template selector
+  const [selectedTemplateId, setSelectedTemplateId] =
+    useState<IndustryTemplateId>("AUTOMOTIVE_EV_HELIOS");
+
   // Selected row in Assurance Matrix for Strong Kleene K3 Proof inspection
   const [selectedSliceOblKey, setSelectedSliceOblKey] = useState<string | null>(null);
 
   // Counterfactual Simulator state
   const [cfKind, setCfKind] = useState<CounterfactualRequest["kind"]>("CAP_REV_C_CUTOVER");
-  const [cfVariantScope, setCfVariantScope] = useState<"ALL" | "VAR_400V" | "VAR_800V">("VAR_400V");
+  const [cfVariantScope, setCfVariantScope] = useState<string>("VAR_400V");
   const [cfSerialFrom, setCfSerialFrom] = useState<string>("5000");
   const [cfSerialTo, setCfSerialTo] = useState<string>("");
   const [cfMinAmbient, setCfMinAmbient] = useState<string>("-20");
@@ -247,13 +338,59 @@ const LineLockAssuranceCockpit: React.FC = () => {
     "Verified governed BOM bindings, operating-envelope bounds, and Strong Kleene K3 carry-forward trace."
   );
 
+  // Custom Studio & Live Jira Evidence Binding state
+  const [customSlotPath, setCustomSlotPath] = useState<string>("HV_INV/DC_LINK_CAP_C14");
+  const [customPartNumber, setCustomPartNumber] = useState<string>("CAP-1210-HV");
+  const [customRevision, setCustomRevision] = useState<string>("E");
+  const [customTitle, setCustomTitle] = useState<string>(
+    "1210 MLCC Capacitor 1100V C0G (400V & 800V Qualified)"
+  );
+  const [customSpecStatus, setCustomSpecStatus] =
+    useState<ItemRevision["specStatus"]>("APPROVED");
+  const [customAttrKey, setCustomAttrKey] = useState<string>("v_rated");
+  const [customAttrValue, setCustomAttrValue] = useState<string>("1100");
+  const [customAttrScale, setCustomAttrScale] = useState<string>("0");
+  const [customAttrUnit, setCustomAttrUnit] = useState<string>("V");
+  const [customEnumKey, setCustomEnumKey] = useState<string>("dielectric");
+  const [customEnumValue, setCustomEnumValue] = useState<string>("C0G");
+  const [customVariantScope, setCustomVariantScope] = useState<string>("ALL");
+  const [customSerialFrom, setCustomSerialFrom] = useState<string>("5000");
+  const [customSerialTo, setCustomSerialTo] = useState<string>("");
+
+  const [bindEvidenceId, setBindEvidenceId] = useState<string>("EV-400-RIPPLE");
+  const [bindJiraKey, setBindJiraKey] = useState<string>("");
+
+  const syncTemplateDependentDefaults = (nextView: EcoWorkspaceView): void => {
+    const cat = nextView.workspace?.catalog;
+    if (cat) {
+      const tpl = inferTemplateFromCatalog(cat);
+      setSelectedTemplateId(tpl.templateId);
+      setCfVariantScope(tpl.flagshipScopedVariantId);
+      const defs = defaultStudioFieldsForCatalog(cat);
+      setCustomSlotPath(defs.slotPath);
+      setCustomPartNumber(defs.partNumber);
+      setCustomRevision(defs.revision);
+      setCustomTitle(defs.title);
+      setCustomAttrKey(defs.attrKey);
+      setCustomAttrValue(defs.attrVal);
+      setCustomAttrScale(defs.attrScale);
+      setCustomAttrUnit(defs.attrUnit);
+      setCustomEnumKey(defs.enumKey);
+      setCustomEnumValue(defs.enumVal);
+      if (cat.evidenceRecords[0]) {
+        setBindEvidenceId(cat.evidenceRecords[0].evidenceId);
+      }
+    }
+    if (nextView.evaluation?.attestationSummary.missingRoles[0]) {
+      setSelectedRole(nextView.evaluation.attestationSummary.missingRoles[0]);
+    }
+  };
+
   const refreshView = async (): Promise<void> => {
     try {
       const res = unwrapInvoke(await invoke<EcoWorkspaceView>("getWorkspaceView"));
       setView(res);
-      if (res.evaluation?.attestationSummary.missingRoles[0]) {
-        setSelectedRole(res.evaluation.attestationSummary.missingRoles[0]);
-      }
+      syncTemplateDependentDefaults(res);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
@@ -278,22 +415,30 @@ const LineLockAssuranceCockpit: React.FC = () => {
 
   const handleProvisionLiveJira = (): Promise<void> =>
     runAction("provision-live", async () => {
-      const next = unwrapInvoke(await invoke<EcoWorkspaceView>("provisionLiveJiraWorkspace"));
+      const next = unwrapInvoke(
+        await invoke<EcoWorkspaceView>("provisionLiveJiraWorkspace", {
+          templateId: selectedTemplateId
+        })
+      );
       setView(next);
       setCfResult(null);
-      if (next.evaluation?.attestationSummary.missingRoles[0]) {
-        setSelectedRole(next.evaluation.attestationSummary.missingRoles[0]);
-      }
+      syncTemplateDependentDefaults(next);
+      const tpl = inferTemplateFromCatalog(next.workspace?.catalog);
       setStatusNotice(
-        "Provisioned 6 live Jira qualification work items in Done status and pinned their SHA-256 content hashes in Forge SQL."
+        `Provisioned 6 live Jira qualification work items for "${tpl.domainLabel}" in Done status and pinned their RFC 8785 SHA-256 content hashes in Forge SQL.`
       );
     });
 
   const handleSeedOffline = (): Promise<void> =>
     runAction("seed-offline", async () => {
-      const next = unwrapInvoke(await invoke<EcoWorkspaceView>("seedHeliosWorkspace"));
+      const next = unwrapInvoke(
+        await invoke<EcoWorkspaceView>("seedHeliosWorkspace", {
+          templateId: selectedTemplateId
+        })
+      );
       setView(next);
       setCfResult(null);
+      syncTemplateDependentDefaults(next);
       setStatusNotice("Initialized offline reference catalog in Forge SQL.");
     });
 
@@ -325,12 +470,14 @@ const LineLockAssuranceCockpit: React.FC = () => {
         Number.isFinite(parsedEnd) && parsedEnd > parsedSerial ? parsedEnd : null;
       const targetVariants: "ALL" | readonly string[] =
         cfVariantScope === "ALL" ? "ALL" : [cfVariantScope];
+      const fallbackVariant =
+        view?.workspace?.catalog.variants[0]?.variantId ?? "VAR_400V";
 
       const request: CounterfactualRequest =
         cfKind === "AMBIENT_ENVELOPE_SHIFT"
           ? {
               kind: "AMBIENT_ENVELOPE_SHIFT",
-              variantId: cfVariantScope === "VAR_800V" ? "VAR_800V" : "VAR_400V",
+              variantId: cfVariantScope === "ALL" ? fallbackVariant : cfVariantScope,
               minAmbientC: Number.parseInt(cfMinAmbient, 10) || -20,
               maxAmbientC: Number.parseInt(cfMaxAmbient, 10) || 58
             }
@@ -366,6 +513,71 @@ const LineLockAssuranceCockpit: React.FC = () => {
       }
       setStatusNotice(
         `Committed simulated operations via Forge SQL CAS (rev ${next.workspace?.revisionSeq}, approval generation ${next.workspace?.eco.approvalGeneration}).`
+      );
+    });
+
+  const handleAuthorCustomComponent = (): Promise<void> =>
+    runAction("author-custom", async () => {
+      if (!view?.workspace) return;
+      const parsedSerialFrom = Math.max(1000, Number.parseInt(customSerialFrom, 10) || 5000);
+      const rawEnd = customSerialTo.trim();
+      const parsedEnd = rawEnd.length > 0 ? Number.parseInt(rawEnd, 10) : Number.NaN;
+      const serialTo =
+        Number.isFinite(parsedEnd) && parsedEnd > parsedSerialFrom ? parsedEnd : null;
+
+      const request: CustomComponentSubstitutionRequest = {
+        partNumber: customPartNumber,
+        revision: customRevision,
+        title: customTitle,
+        specStatus: customSpecStatus,
+        targetSlotPath: customSlotPath,
+        primaryNumericAttrKey: customAttrKey,
+        primaryNumericValue: Number.parseInt(customAttrValue, 10) || 0,
+        primaryNumericScale: Number.parseInt(customAttrScale, 10) || 0,
+        primaryNumericUnit: customAttrUnit,
+        secondaryEnumAttrKey: customEnumKey.trim() || undefined,
+        secondaryEnumValue: customEnumValue.trim() || undefined,
+        targetVariants: customVariantScope === "ALL" ? "ALL" : [customVariantScope],
+        serialFrom: parsedSerialFrom,
+        serialTo
+      };
+
+      const next = unwrapInvoke(
+        await invoke<EcoWorkspaceView>("authorCustomComponentSubstitution", {
+          expectedRevisionSeq: view.workspace.revisionSeq,
+          request
+        })
+      );
+      setView(next);
+      setCfResult(null);
+      if (next.evaluation?.attestationSummary.missingRoles[0]) {
+        setSelectedRole(next.evaluation.attestationSummary.missingRoles[0]);
+      }
+      setStatusNotice(
+        `Authored custom component ${customPartNumber}@${customRevision} (${customSpecStatus}) on ${customSlotPath} and committed serial cutover via SQL CAS (rev ${next.workspace?.revisionSeq}, gen ${next.workspace?.eco.approvalGeneration}).`
+      );
+    });
+
+  const handleBindCustomJiraTicket = (): Promise<void> =>
+    runAction("bind-jira", async () => {
+      if (!view?.workspace) return;
+      const request: BindJiraEvidenceRequest = {
+        evidenceId: bindEvidenceId,
+        jiraIssueKeyOrId: bindJiraKey
+      };
+      const next = unwrapInvoke(
+        await invoke<EcoWorkspaceView>("bindCustomJiraEvidenceTicket", {
+          expectedRevisionSeq: view.workspace.revisionSeq,
+          request
+        })
+      );
+      setView(next);
+      setBindJiraKey("");
+      if (next.evaluation?.attestationSummary.missingRoles[0]) {
+        setSelectedRole(next.evaluation.attestationSummary.missingRoles[0]);
+      }
+      setStatusNotice(
+        `Bound live Done Jira ticket "${request.jiraIssueKeyOrId}" to ${bindEvidenceId}, pinned its RFC 8785 SHA-256 hash, and incremented approvalGeneration to ${next.workspace?.eco.approvalGeneration}.`
       );
     });
 
@@ -461,6 +673,9 @@ const LineLockAssuranceCockpit: React.FC = () => {
   const evaluation = view?.evaluation ?? null;
   const workspace = view?.workspace ?? null;
   const evidenceIntegrity = view?.evidenceIntegrity ?? [];
+  const activeTemplate = inferTemplateFromCatalog(workspace?.catalog);
+  const selectedOnboardingTemplate =
+    INDUSTRY_TEMPLATES.find((t) => t.templateId === selectedTemplateId) ?? INDUSTRY_TEMPLATES[0]!;
 
   const supportedCount = evaluation
     ? evaluation.sliceObligations.filter(
@@ -471,6 +686,10 @@ const LineLockAssuranceCockpit: React.FC = () => {
   const minRetestCount = evaluation
     ? evaluation.remediationPlans.reduce((acc, p) => acc + p.selectedActions.length, 0)
     : 0;
+  const coverageRatio =
+    evaluation && evaluation.sliceObligations.length > 0
+      ? supportedCount / evaluation.sliceObligations.length
+      : 0;
 
   const inspectedSliceObl: SliceObligationEvaluation | null =
     evaluation?.sliceObligations.find(
@@ -481,6 +700,78 @@ const LineLockAssuranceCockpit: React.FC = () => {
     ) ??
     evaluation?.sliceObligations[0] ??
     null;
+
+  // StackBarChart data for Tab 1: Slice x Verdict breakdown
+  const sliceStackChartData = evaluation
+    ? evaluation.slices.flatMap((sl) => {
+        const label = `${sl.variantId} [${sl.interval.serialFrom}..${sl.interval.serialTo ?? "+inf"})`;
+        const matching = evaluation.sliceObligations.filter((so) => so.sliceId === sl.sliceId);
+        const asTested = matching.filter((m) => m.status === "SUPPORTED_AS_TESTED").length;
+        const byRule = matching.filter((m) => m.status === "SUPPORTED_BY_APPROVED_RULE").length;
+        const inv = matching.filter((m) => m.status.startsWith("INVALIDATED_")).length;
+        const ind = matching.length - asTested - byRule - inv;
+        return [
+          { slice: label, count: asTested, verdict: "Supported As Tested" },
+          { slice: label, count: byRule, verdict: "Supported By K3 Rule" },
+          { slice: label, count: inv, verdict: "Invalidated (FALSE)" },
+          { slice: label, count: ind, verdict: "Indeterminate / Uncovered" }
+        ].filter((d) => d.count > 0);
+      })
+    : [];
+
+  // BarChart data for Tab 2: Baselines comparison (simulated if active, otherwise live ECO)
+  const baselineChartTotals = cfResult?.baselineComparison
+    ? {
+        b0Supported: cfResult.baselineComparison.b0.filter((x) => x.verdict === "SUPPORTED")
+          .length,
+        b1Supported: cfResult.baselineComparison.b1.filter((x) => x.verdict === "SUPPORTED")
+          .length,
+        b2Supported: cfResult.baselineComparison.b2.filter((x) => x.verdict === "SUPPORTED")
+          .length,
+        linelockSupported: cfResult.delta.simulatedSupportedCount,
+        totalSliceObligations: cfResult.simulatedEvaluation.sliceObligations.length
+      }
+    : view?.baselineSummary;
+
+  const baselineChartData = baselineChartTotals
+    ? [
+        {
+          method: "B0 Timestamp",
+          supported: baselineChartTotals.b0Supported,
+          series: "B0 Timestamp Freshness"
+        },
+        {
+          method: "B1 ALM Suspect",
+          supported: baselineChartTotals.b1Supported,
+          series: "B1 Untyped ALM Links"
+        },
+        {
+          method: "B2 PLM Env",
+          supported: baselineChartTotals.b2Supported,
+          series: "B2 PLM Version + Env"
+        },
+        {
+          method: "LineLock K3",
+          supported: baselineChartTotals.linelockSupported,
+          series: "LineLock Strong Kleene K3"
+        }
+      ]
+    : [];
+
+  const templateOptions = INDUSTRY_TEMPLATES.map((t) => ({
+    label: t.domainLabel,
+    value: t.templateId
+  }));
+
+  const variantScopeOptions = [
+    { label: "ALL Product Variants", value: "ALL" },
+    ...(workspace?.catalog.variants.map((v) => ({
+      label: `${v.variantId} — ${v.displayName}`,
+      value: v.variantId
+    })) ?? [])
+  ];
+
+  const leafSlots = collectGovernedLeafSlots(workspace?.catalog);
 
   return (
     <Stack space="space.200">
@@ -508,7 +799,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
               ) : null}
             </Inline>
 
-            <Inline space="space.100" shouldWrap>
+            <Inline space="space.100" alignBlock="center" shouldWrap>
               <LoadingButton
                 isLoading={busyAction === "refresh"}
                 onClick={() => runAction("refresh", refreshView)}
@@ -516,12 +807,25 @@ const LineLockAssuranceCockpit: React.FC = () => {
                 Refresh Live State
               </LoadingButton>
               {workspace ? (
-                <LoadingButton
-                  isLoading={busyAction === "provision-live"}
-                  onClick={handleProvisionLiveJira}
-                >
-                  Re-Provision 6 Live Jira Tests
-                </LoadingButton>
+                <>
+                  <Select
+                    options={templateOptions}
+                    value={{
+                      label: selectedOnboardingTemplate.domainLabel,
+                      value: selectedTemplateId
+                    }}
+                    onChange={(opt: { value?: string } | null) => {
+                      const v = opt?.value as IndustryTemplateId | undefined;
+                      if (v) setSelectedTemplateId(v);
+                    }}
+                  />
+                  <LoadingButton
+                    isLoading={busyAction === "provision-live"}
+                    onClick={handleProvisionLiveJira}
+                  >
+                    Provision Selected Template (6 Live Tests)
+                  </LoadingButton>
+                </>
               ) : null}
             </Inline>
           </Inline>
@@ -529,8 +833,12 @@ const LineLockAssuranceCockpit: React.FC = () => {
           <Inline space="space.100" alignBlock="center" shouldWrap>
             <Tag text={`SQL: ${view?.provisioning.state ?? "CHECKING"}`} color="teal" />
             <Tag text="Runs on Atlassian" color="blue" />
+            {workspace ? (
+              <Tag text={activeTemplate.standardReference} color="purple" />
+            ) : null}
             {workspace && evaluation ? (
               <>
+                <Code>{`Family: ${workspace.catalog.familyId}`}</Code>
                 <Code>{`Gate: ${evaluation.gateState}`}</Code>
                 <Code>{`SHA-256: ${evaluation.snapshotSha256.slice(0, 12)}...`}</Code>
                 <Code>{`Approval Gen: ${workspace.eco.approvalGeneration}`}</Code>
@@ -578,15 +886,36 @@ const LineLockAssuranceCockpit: React.FC = () => {
         </SectionMessage>
       ) : null}
 
-      {/* Unseeded Onboarding View */}
+      {/* Unseeded Multi-Industry Onboarding View */}
       {view?.provisioning.state === "READY" && !workspace ? (
         <Box xcss={cardBoxStyle}>
           <Stack space="space.150">
-            <Heading size="small">Initialize Helios EV Traction Battery Pack ECO</Heading>
+            <Heading size="small">
+              Initialize Regulated Hardware Engineering Change Order (Multi-Industry)
+            </Heading>
+            <Stack space="space.050">
+              <Text>Select Regulated Hardware Industry Domain Template</Text>
+              <Select
+                options={templateOptions}
+                value={{
+                  label: selectedOnboardingTemplate.domainLabel,
+                  value: selectedTemplateId
+                }}
+                onChange={(opt: { value?: string } | null) => {
+                  const v = opt?.value as IndustryTemplateId | undefined;
+                  if (v) setSelectedTemplateId(v);
+                }}
+              />
+            </Stack>
+            <Inline space="space.100" alignBlock="center" shouldWrap>
+              <Tag text={selectedOnboardingTemplate.standardReference} color="purple" />
+              <Text>{selectedOnboardingTemplate.summary}</Text>
+            </Inline>
             <Text>
-              Provision 6 real Jira qualification work items (400V &amp; 800V HV Thermal Ripple,
-              12V Conducted EMC, and IP67 Enclosure Ingress), transition them to Done, link them to
-              this ECO, and pin their live RFC 8785 SHA-256 content hashes in Forge SQL.
+              LineLock will create 6 real Jira qualification work items in this space, transition
+              each to Done, link them to this ECO, and pin their live RFC 8785 SHA-256 content
+              hashes in Forge SQL. You can also author custom components and bind your own Jira
+              tickets in the Custom Studio tab.
             </Text>
             <Inline space="space.100" shouldWrap>
               <LoadingButton
@@ -594,7 +923,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
                 isLoading={busyAction === "provision-live"}
                 onClick={handleProvisionLiveJira}
               >
-                Provision Helios EV Pack + 6 Live Jira Tests (Recommended)
+                Provision 6 Live Jira Qualification Tests (Recommended)
               </LoadingButton>
               <LoadingButton
                 isLoading={busyAction === "seed-offline"}
@@ -607,12 +936,13 @@ const LineLockAssuranceCockpit: React.FC = () => {
         </Box>
       ) : null}
 
-      {/* Main 4-Tab Engineering Cockpit */}
+      {/* Main 5-Tab Engineering Cockpit */}
       {workspace && evaluation ? (
         <Tabs id="linelock-cockpit-tabs">
           <TabList>
             <Tab>Assurance Matrix &amp; K3 Proof</Tab>
             <Tab>Counterfactual &amp; Remediation</Tab>
+            <Tab>Custom Studio &amp; Jira Binding</Tab>
             <Tab>Governance &amp; ABA Signoff</Tab>
             <Tab>Jira Evidence &amp; Diagnostics</Tab>
           </TabList>
@@ -649,20 +979,50 @@ const LineLockAssuranceCockpit: React.FC = () => {
                 </Box>
               </Inline>
 
+              <Box xcss={traceNodeStyle}>
+                <Stack space="space.075">
+                  <Inline spread="space-between" alignBlock="center">
+                    <Text>Effectivity-Scoped Assurance Coverage</Text>
+                    <Code>{`${Math.round(coverageRatio * 100)}% (${supportedCount}/${evaluation.sliceObligations.length})`}</Code>
+                  </Inline>
+                  <ProgressBar
+                    ariaLabel="Assurance obligation coverage"
+                    appearance={coverageRatio >= 1 ? "success" : "default"}
+                    value={coverageRatio}
+                  />
+                </Stack>
+              </Box>
+
+              {sliceStackChartData.length > 0 ? (
+                <Box xcss={traceNodeStyle}>
+                  <StackBarChart
+                    title="Assurance Verdicts by Variant & Effective Serial Interval"
+                    subtitle="Live Strong Kleene K3 disposition across refined unit serial partitions"
+                    data={sliceStackChartData}
+                    xAccessor="slice"
+                    yAccessor="count"
+                    colorAccessor="verdict"
+                    height={240}
+                  />
+                </Box>
+              ) : null}
+
               <Box xcss={cardBoxStyle}>
                 <Stack space="space.100">
-                  <Heading size="xsmall">Commit Engineering Change Scenario (CAS + Gen Increment)</Heading>
+                  <Heading size="xsmall">
+                    Commit Engineering Change Scenario (CAS + Gen Increment)
+                  </Heading>
                   <Inline space="space.100" shouldWrap>
                     <LoadingButton
                       isLoading={busyAction === "preset:CAP_REV_C_ALL_5000"}
                       onClick={() =>
                         handleApplyPreset(
                           "CAP_REV_C_ALL_5000",
-                          "Cap Rev C on ALL Variants (SN >= 5000)"
+                          activeTemplate.flagshipCutoverLabel
                         )
                       }
                     >
-                      Propose Cap Rev C (ALL, SN&gt;=5000)
+                      {activeTemplate.flagshipCutoverLabel}
                     </LoadingButton>
                     <LoadingButton
                       appearance="primary"
@@ -670,22 +1030,22 @@ const LineLockAssuranceCockpit: React.FC = () => {
                       onClick={() =>
                         handleApplyPreset(
                           "CAP_REV_C_400V_5000",
-                          "Scoped Cap Rev C on 400V Only (SN >= 5000)"
+                          activeTemplate.flagshipScopedLabel
                         )
                       }
                     >
-                      Scope Cap Rev C to 400V Only (SN&gt;=5000)
+                      {activeTemplate.flagshipScopedLabel}
                     </LoadingButton>
                     <LoadingButton
                       isLoading={busyAction === "preset:COLD_SOAK_MINUS_40C"}
                       onClick={() =>
                         handleApplyPreset(
                           "COLD_SOAK_MINUS_40C",
-                          "Arctic Cold-Soak -40C Envelope Shift"
+                          "Extreme Cold-Soak Envelope Regression"
                         )
                       }
                     >
-                      Test -40C Cold-Soak Regression
+                      Test Cold-Soak Envelope Regression
                     </LoadingButton>
                     <LoadingButton
                       isLoading={busyAction === "preset:SEAL_REV_B_3000"}
@@ -889,19 +1249,19 @@ const LineLockAssuranceCockpit: React.FC = () => {
                       <Select
                         options={[
                           {
-                            label: "HV Cap -> CAP-1210@C (630V X7R)",
+                            label: "Flagship Second-Source Substitution",
                             value: "CAP_REV_C_CUTOVER"
                           },
                           {
-                            label: "HV Cap -> CAP-1210@D_DRAFT (Unapproved Sample)",
+                            label: "Unapproved Engineering Sample (DRAFT Gate)",
                             value: "CAP_REV_D_DRAFT_CUTOVER"
                           },
                           {
-                            label: "Gate Driver -> DRV-ISO@B (19ns Uncovered Slot)",
+                            label: "Uncovered Governed Slot Substitution",
                             value: "GATE_DRIVER_REV_B_CUTOVER"
                           },
                           {
-                            label: "Enclosure Gasket -> SEAL-EPDM@B (Excluded HV/EMC)",
+                            label: "Excluded Seal / Breather Substitution",
                             value: "SEAL_REV_B_CUTOVER"
                           },
                           {
@@ -912,13 +1272,13 @@ const LineLockAssuranceCockpit: React.FC = () => {
                         value={{
                           label:
                             cfKind === "CAP_REV_C_CUTOVER"
-                              ? "HV Cap -> CAP-1210@C (630V X7R)"
+                              ? "Flagship Second-Source Substitution"
                               : cfKind === "CAP_REV_D_DRAFT_CUTOVER"
-                                ? "HV Cap -> CAP-1210@D_DRAFT (Unapproved Sample)"
+                                ? "Unapproved Engineering Sample (DRAFT Gate)"
                                 : cfKind === "GATE_DRIVER_REV_B_CUTOVER"
-                                  ? "Gate Driver -> DRV-ISO@B (19ns Uncovered Slot)"
+                                  ? "Uncovered Governed Slot Substitution"
                                   : cfKind === "SEAL_REV_B_CUTOVER"
-                                    ? "Enclosure Gasket -> SEAL-EPDM@B (Excluded HV/EMC)"
+                                    ? "Excluded Seal / Breather Substitution"
                                     : "Shift Operating Ambient Temperature Envelope",
                           value: cfKind
                         }}
@@ -940,25 +1300,13 @@ const LineLockAssuranceCockpit: React.FC = () => {
                     <Stack space="space.050">
                       <Text>Target Variant Scope</Text>
                       <Select
-                        options={[
-                          { label: "VAR_400V Commuter Pack Only", value: "VAR_400V" },
-                          { label: "ALL Variants (400V + 800V)", value: "ALL" },
-                          { label: "VAR_800V HyperCharge Only", value: "VAR_800V" }
-                        ]}
-                        value={{
-                          label:
-                            cfVariantScope === "VAR_400V"
-                              ? "VAR_400V Commuter Pack Only"
-                              : cfVariantScope === "ALL"
-                                ? "ALL Variants (400V + 800V)"
-                                : "VAR_800V HyperCharge Only",
-                          value: cfVariantScope
-                        }}
+                        options={variantScopeOptions}
+                        value={
+                          variantScopeOptions.find((o) => o.value === cfVariantScope) ??
+                          variantScopeOptions[0]!
+                        }
                         onChange={(opt: { value?: string } | null) => {
-                          const v = opt?.value;
-                          if (v === "ALL" || v === "VAR_400V" || v === "VAR_800V") {
-                            setCfVariantScope(v);
-                          }
+                          if (opt?.value) setCfVariantScope(opt.value);
                         }}
                       />
                     </Stack>
@@ -1040,45 +1388,30 @@ const LineLockAssuranceCockpit: React.FC = () => {
                         {cfResult.simulatedEvaluation.blockingReasons.map((r, i) => (
                           <Text key={`sim-blk-${i}`}>{`• ${r}`}</Text>
                         ))}
-
-                        {cfResult.baselineComparison ? (
-                          <Stack space="space.075">
-                            <Heading size="xsmall">
-                              Simulated Industry Baseline Comparison (Why Traditional PLM/ALM Fails)
-                            </Heading>
-                            <Inline space="space.100" shouldWrap>
-                              <Code>
-                                {`B0 (Timestamp Freshness): ${
-                                  cfResult.baselineComparison.b0.filter(
-                                    (x) => x.verdict === "SUPPORTED"
-                                  ).length
-                                }/${cfResult.baselineComparison.b0.length} supported`}
-                              </Code>
-                              <Code>
-                                {`B1 (Untyped ALM Suspect Graph): ${
-                                  cfResult.baselineComparison.b1.filter(
-                                    (x) => x.verdict === "SUPPORTED"
-                                  ).length
-                                }/${cfResult.baselineComparison.b1.length} supported`}
-                              </Code>
-                              <Code>
-                                {`B2 (PLM Version + Std Envelope): ${
-                                  cfResult.baselineComparison.b2.filter(
-                                    (x) => x.verdict === "SUPPORTED"
-                                  ).length
-                                }/${cfResult.baselineComparison.b2.length} supported`}
-                              </Code>
-                              <Code>
-                                {`LineLock (Strong Kleene K3): ${cfResult.delta.simulatedSupportedCount}/${cfResult.simulatedEvaluation.sliceObligations.length} supported`}
-                              </Code>
-                            </Inline>
-                          </Stack>
-                        ) : null}
                       </Stack>
                     </Box>
                   ) : null}
                 </Stack>
               </Box>
+
+              {/* Baseline Discrepancy BarChart */}
+              {baselineChartData.length > 0 && baselineChartTotals ? (
+                <Box xcss={traceNodeStyle}>
+                  <BarChart
+                    title={
+                      cfResult
+                        ? "Simulated Baseline Comparison (Why Traditional PLM/ALM Fails)"
+                        : "Active ECO Baseline Comparison (Why Traditional PLM/ALM Fails)"
+                    }
+                    subtitle={`Supported slice × obligations out of ${baselineChartTotals.totalSliceObligations} total`}
+                    data={baselineChartData}
+                    xAccessor="method"
+                    yAccessor="supported"
+                    colorAccessor="series"
+                    height={240}
+                  />
+                </Box>
+              ) : null}
 
               {/* Exact Bounded Set-Cover Remediation Plan */}
               <Box xcss={cardBoxStyle}>
@@ -1125,7 +1458,226 @@ const LineLockAssuranceCockpit: React.FC = () => {
             </Stack>
           </TabPanel>
 
-          {/* TAB 3: GOVERNANCE, SEPARATION OF DUTIES & ABA SIGNOFF */}
+          {/* TAB 3: CUSTOM COMPONENT STUDIO & LIVE JIRA EVIDENCE BINDING */}
+          <TabPanel>
+            <Stack space="space.200">
+              <Box xcss={cardBoxStyle}>
+                <Stack space="space.150">
+                  <Heading size="small">
+                    Interactive Custom Component &amp; Serial-Effectivity Authoring Studio
+                  </Heading>
+                  <Text>
+                    Define any custom component revision (APPROVED or unapproved DRAFT sample),
+                    specify its quantitative and enumerated engineering attributes, and commit a
+                    variant- and serial-scoped BOM substitution directly into Forge SQL TiDB via
+                    optimistic CAS. LineLock evaluates your custom specification live through its
+                    Strong Kleene K3 engine.
+                  </Text>
+
+                  <Inline space="space.150" shouldWrap alignBlock="end">
+                    <Stack space="space.050">
+                      <Text>Governed BOM Slot Path</Text>
+                      <Select
+                        options={leafSlots.map((sp) => ({ label: sp, value: sp }))}
+                        value={{ label: customSlotPath, value: customSlotPath }}
+                        onChange={(opt: { value?: string } | null) => {
+                          if (opt?.value) setCustomSlotPath(opt.value);
+                        }}
+                      />
+                    </Stack>
+
+                    <Stack space="space.050">
+                      <Text>Part Number</Text>
+                      <Textfield
+                        value={customPartNumber}
+                        onChange={(e) => setCustomPartNumber(extractEventString(e))}
+                      />
+                    </Stack>
+
+                    <Stack space="space.050">
+                      <Text>Revision</Text>
+                      <Textfield
+                        value={customRevision}
+                        onChange={(e) => setCustomRevision(extractEventString(e))}
+                      />
+                    </Stack>
+
+                    <Stack space="space.050">
+                      <Text>Release Specification Status</Text>
+                      <Select
+                        options={[
+                          { label: "APPROVED (Production Released)", value: "APPROVED" },
+                          { label: "DRAFT (Unapproved Sample — Blocks Gate)", value: "DRAFT" }
+                        ]}
+                        value={{
+                          label:
+                            customSpecStatus === "APPROVED"
+                              ? "APPROVED (Production Released)"
+                              : "DRAFT (Unapproved Sample — Blocks Gate)",
+                          value: customSpecStatus
+                        }}
+                        onChange={(opt: { value?: string } | null) => {
+                          if (opt?.value === "APPROVED" || opt?.value === "DRAFT") {
+                            setCustomSpecStatus(opt.value);
+                          }
+                        }}
+                      />
+                    </Stack>
+                  </Inline>
+
+                  <Stack space="space.050">
+                    <Text>Component Engineering Description</Text>
+                    <Textfield
+                      value={customTitle}
+                      onChange={(e) => setCustomTitle(extractEventString(e))}
+                    />
+                  </Stack>
+
+                  <Inline space="space.150" shouldWrap alignBlock="end">
+                    <Stack space="space.050">
+                      <Text>Primary Quantitative Attr Key</Text>
+                      <Textfield
+                        value={customAttrKey}
+                        onChange={(e) => setCustomAttrKey(extractEventString(e))}
+                      />
+                    </Stack>
+                    <Stack space="space.050">
+                      <Text>Mantissa (Integer)</Text>
+                      <Textfield
+                        value={customAttrValue}
+                        onChange={(e) => setCustomAttrValue(extractEventString(e))}
+                      />
+                    </Stack>
+                    <Stack space="space.050">
+                      <Text>10^Scale (e.g. 0 or -1)</Text>
+                      <Textfield
+                        value={customAttrScale}
+                        onChange={(e) => setCustomAttrScale(extractEventString(e))}
+                      />
+                    </Stack>
+                    <Stack space="space.050">
+                      <Text>Physical Unit (V, degC, pct...)</Text>
+                      <Textfield
+                        value={customAttrUnit}
+                        onChange={(e) => setCustomAttrUnit(extractEventString(e))}
+                      />
+                    </Stack>
+                  </Inline>
+
+                  <Inline space="space.150" shouldWrap alignBlock="end">
+                    <Stack space="space.050">
+                      <Text>Optional Enum Attr Key</Text>
+                      <Textfield
+                        placeholder="e.g. dielectric"
+                        value={customEnumKey}
+                        onChange={(e) => setCustomEnumKey(extractEventString(e))}
+                      />
+                    </Stack>
+                    <Stack space="space.050">
+                      <Text>Optional Enum Value</Text>
+                      <Textfield
+                        placeholder="e.g. C0G or X7R"
+                        value={customEnumValue}
+                        onChange={(e) => setCustomEnumValue(extractEventString(e))}
+                      />
+                    </Stack>
+                    <Stack space="space.050">
+                      <Text>Target Variant Scope</Text>
+                      <Select
+                        options={variantScopeOptions}
+                        value={
+                          variantScopeOptions.find((o) => o.value === customVariantScope) ??
+                          variantScopeOptions[0]!
+                        }
+                        onChange={(opt: { value?: string } | null) => {
+                          if (opt?.value) setCustomVariantScope(opt.value);
+                        }}
+                      />
+                    </Stack>
+                    <Stack space="space.050">
+                      <Text>Serial Start (SN &gt;=)</Text>
+                      <Textfield
+                        value={customSerialFrom}
+                        onChange={(e) => setCustomSerialFrom(extractEventString(e))}
+                      />
+                    </Stack>
+                    <Stack space="space.050">
+                      <Text>Serial End (blank = +inf)</Text>
+                      <Textfield
+                        placeholder="+inf"
+                        value={customSerialTo}
+                        onChange={(e) => setCustomSerialTo(extractEventString(e))}
+                      />
+                    </Stack>
+                  </Inline>
+
+                  <Inline space="space.100">
+                    <LoadingButton
+                      appearance="primary"
+                      isLoading={busyAction === "author-custom"}
+                      onClick={handleAuthorCustomComponent}
+                    >
+                      Commit Custom Component &amp; Serial Cutover (SQL CAS)
+                    </LoadingButton>
+                  </Inline>
+                </Stack>
+              </Box>
+
+              {/* Bind Existing Live Jira Ticket as Pinned Evidence */}
+              <Box xcss={cardBoxStyle}>
+                <Stack space="space.150">
+                  <Heading size="small">
+                    Bind Existing Live Jira Work Item as Content-Pinned Qualification Evidence
+                  </Heading>
+                  <Text>
+                    Already track qualification test protocols as Jira work items in your space?
+                    Select an obligation evidence slot below and enter any live Jira issue key in
+                    Done status. LineLock verifies live statusCategory=done, registers workflow
+                    pass-through, pins its canonical RFC 8785 SHA-256 hash, and increments
+                    approvalGeneration.
+                  </Text>
+
+                  <Inline space="space.150" shouldWrap alignBlock="end">
+                    <Stack space="space.050">
+                      <Text>Target Verification Evidence Slot</Text>
+                      <Select
+                        options={workspace.catalog.evidenceRecords.map((ev) => ({
+                          label: `${ev.evidenceId} (${ev.testedVariantId} -> currently ${ev.jiraIssueKey})`,
+                          value: ev.evidenceId
+                        }))}
+                        value={{
+                          label: `${bindEvidenceId}`,
+                          value: bindEvidenceId
+                        }}
+                        onChange={(opt: { value?: string } | null) => {
+                          if (opt?.value) setBindEvidenceId(opt.value);
+                        }}
+                      />
+                    </Stack>
+
+                    <Stack space="space.050">
+                      <Text>Live Done Jira Issue Key (e.g. ECO-8)</Text>
+                      <Textfield
+                        placeholder="ECO-8"
+                        value={bindJiraKey}
+                        onChange={(e) => setBindJiraKey(extractEventString(e))}
+                      />
+                    </Stack>
+
+                    <LoadingButton
+                      appearance="primary"
+                      isLoading={busyAction === "bind-jira"}
+                      onClick={handleBindCustomJiraTicket}
+                    >
+                      Bind Done Jira Ticket &amp; Pin SHA-256 Hash
+                    </LoadingButton>
+                  </Inline>
+                </Stack>
+              </Box>
+            </Stack>
+          </TabPanel>
+
+          {/* TAB 4: GOVERNANCE, SEPARATION OF DUTIES & ABA SIGNOFF */}
           <TabPanel>
             <Stack space="space.200">
               <Box xcss={cardBoxStyle}>
@@ -1138,7 +1690,8 @@ const LineLockAssuranceCockpit: React.FC = () => {
                       appearance={
                         workspace.catalog.policy.enforceSeparationOfDuties ? "inprogress" : "moved"
                       }
-                      isBold maxWidth={340}
+                      isBold
+                      maxWidth={340}
                     >
                       {workspace.catalog.policy.enforceSeparationOfDuties
                         ? "MULTI-ROLE SEPARATION OF DUTIES"
@@ -1231,7 +1784,9 @@ const LineLockAssuranceCockpit: React.FC = () => {
                     {`Accepted Attestations (${evaluation.attestationSummary.acceptedAttestations.length})`}
                   </Heading>
                   {evaluation.attestationSummary.acceptedAttestations.length === 0 ? (
-                    <Text>No valid attestations recorded for the current snapshot &amp; generation.</Text>
+                    <Text>
+                      No valid attestations recorded for the current snapshot &amp; generation.
+                    </Text>
                   ) : (
                     evaluation.attestationSummary.acceptedAttestations.map((att) => (
                       <Inline key={att.attestationId} space="space.100" shouldWrap>
@@ -1301,7 +1856,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
             </Stack>
           </TabPanel>
 
-          {/* TAB 4: LIVE JIRA EVIDENCE HASH MONITOR & DIAGNOSTICS */}
+          {/* TAB 5: LIVE JIRA EVIDENCE HASH MONITOR & DIAGNOSTICS */}
           <TabPanel>
             <Stack space="space.200">
               <SectionMessage
@@ -1363,7 +1918,11 @@ const LineLockAssuranceCockpit: React.FC = () => {
                     {
                       key: "status",
                       content: (
-                        <Lozenge appearance={row.statusIsDone ? "success" : "moved"} isBold maxWidth={340}>
+                        <Lozenge
+                          appearance={row.statusIsDone ? "success" : "moved"}
+                          isBold
+                          maxWidth={340}
+                        >
                           {row.liveStatusCategoryKey ?? "UNREACHABLE"}
                         </Lozenge>
                       )

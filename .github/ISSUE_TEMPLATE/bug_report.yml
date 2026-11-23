@@ -1,0 +1,29 @@
+name: Verification Kernel / Forge App Bug Report
+description: Report a verification invariant violation, Forge SQL CAS issue, or UI Kit 2 defect
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Subsystem Layer
+      options:
+        - "src/core/ — Pure Strong Kleene K3 Verification Kernel"
+        - "src/forge/ — Forge SQL CAS, Jira REST Gateway, Workflow Validator"
+        - "src/frontend/ — Issue Cockpit / Fleet Assurance UI Kit 2"
+        - "rovo:agent / rovo:mcp — Read-Only Rovo & Atlassian MCP Tools"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Deterministic Reproduction Steps or Vitest Case
+      description: Provide the exact BOM / serial-effectivity / Jira state sequence to reproduce.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Deterministic Gate / Slice Verdict
+    validations:
+      required: true

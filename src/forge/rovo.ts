@@ -76,11 +76,7 @@ export function createRovoActionHandlers(params: {
       const issue = await resolveIssue(payload?.issueKey);
       const rawScope = (payload?.variantScope ?? "VAR_400V").trim().toUpperCase();
       const targetVariants: "ALL" | readonly string[] =
-        rawScope === "ALL"
-          ? "ALL"
-          : rawScope === "VAR_800V"
-            ? ["VAR_800V"]
-            : ["VAR_400V"];
+        rawScope === "ALL" || rawScope.length === 0 ? "ALL" : [rawScope];
 
       const serialFrom =
         typeof payload?.serialFrom === "number" && Number.isFinite(payload.serialFrom)
@@ -111,7 +107,7 @@ export function createRovoActionHandlers(params: {
         mutatedStorage: false,
         issueKey: issue.issueKey,
         simulatedParameters: {
-          componentSubstitution: "HV_INV/DC_LINK_CAP_C14 -> CAP-1210@C (630V X7R 10mOhm)",
+          flagshipSubstitution: true,
           targetVariants,
           serialFrom,
           serialTo
@@ -170,6 +166,21 @@ export function createRovoActionHandlers(params: {
         gateState: cmp.linelock.gateState,
         discrepancyCount: discrepancies.length,
         discrepancies
+      };
+    },
+
+    async inspectProjectFleet(payload: { readonly projectKey?: string }) {
+      const pk = typeof payload?.projectKey === "string" ? payload.projectKey.trim() : "";
+      if (!pk) {
+        throw new Error("Input `projectKey` (e.g. 'ECO') is required.");
+      }
+      const overview = await service.getProjectFleetOverview({
+        projectKey: pk
+      });
+      return {
+        authority: "READ_ONLY_DETERMINISTIC_FLEET_KERNEL",
+        mutatedStorage: false,
+        ...overview
       };
     }
   };

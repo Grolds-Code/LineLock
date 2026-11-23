@@ -4,8 +4,11 @@ import type { ChangeOperation } from "../core/types";
 import { buildHeliosCapRevCSubstitution } from "../scenarios/heliosBatteryPack";
 import { ForgeJiraPlatformGateway } from "./jiraGateway";
 import type {
+  BindJiraEvidenceRequest,
   CounterfactualRequest,
+  CustomComponentSubstitutionRequest,
   GovernancePolicyMode,
+  IndustryTemplateId,
   ScenarioPresetId
 } from "./ports";
 import { SqlProvisioningManager } from "./provisioning";
@@ -60,6 +63,20 @@ function extractIssueContext(rawContext: unknown): {
   return { accountId, issueId, issueKey, projectKey };
 }
 
+function extractProjectContext(rawContext: unknown): {
+  readonly accountId: string;
+  readonly projectKey: string;
+} {
+  const ctx = (rawContext ?? {}) as IssuePanelContext;
+  const accountId = ctx.accountId ?? "";
+  const issueKey = ctx.extension?.issue?.key ?? "";
+  const projectKey = ctx.extension?.project?.key ?? (issueKey.split("-")[0] ?? "");
+  if (!projectKey) {
+    throw new Error("Missing Jira projectKey in Forge project page resolver context.");
+  }
+  return { accountId, projectKey };
+}
+
 const resolver = new Resolver();
 
 resolver.define("probeConnectivity", async (req) => {
@@ -83,12 +100,23 @@ resolver.define("getWorkspaceView", async (req) => {
   });
 });
 
+resolver.define("getProjectFleetOverview", async (req) => {
+  const payload = (req.payload ?? {}) as { readonly projectKey?: string };
+  const ctx = extractProjectContext(req.context);
+  return defaultLineLockService.getProjectFleetOverview({
+    projectKey: payload.projectKey?.trim() || ctx.projectKey,
+    callerAccountId: ctx.accountId
+  });
+});
+
 resolver.define("seedHeliosWorkspace", async (req) => {
   const ctx = extractIssueContext(req.context);
+  const payload = (req.payload ?? {}) as { readonly templateId?: IndustryTemplateId };
   await defaultLineLockService.seedReferenceWorkspace({
     ecoIssueId: ctx.issueId,
     ecoIssueKey: ctx.issueKey,
-    callerAccountId: ctx.accountId
+    callerAccountId: ctx.accountId,
+    templateId: payload.templateId
   });
   return defaultLineLockService.getWorkspaceView({
     projectKey: ctx.projectKey,
@@ -99,11 +127,13 @@ resolver.define("seedHeliosWorkspace", async (req) => {
 
 resolver.define("provisionLiveJiraWorkspace", async (req) => {
   const ctx = extractIssueContext(req.context);
+  const payload = (req.payload ?? {}) as { readonly templateId?: IndustryTemplateId };
   return defaultLineLockService.provisionLiveJiraWorkspace({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     ecoIssueKey: ctx.issueKey,
-    callerAccountId: ctx.accountId
+    callerAccountId: ctx.accountId,
+    templateId: payload.templateId
   });
 });
 
@@ -153,6 +183,36 @@ resolver.define("commitCounterfactualOperations", async (req) => {
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
+  });
+});
+
+resolver.define("authorCustomComponentSubstitution", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  const payload = (req.payload ?? {}) as {
+    readonly expectedRevisionSeq: number;
+    readonly request: CustomComponentSubstitutionRequest;
+  };
+  return defaultLineLockService.authorCustomComponentSubstitution({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    expectedRevisionSeq: payload.expectedRevisionSeq,
+    callerAccountId: ctx.accountId,
+    request: payload.request
+  });
+});
+
+resolver.define("bindCustomJiraEvidenceTicket", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  const payload = (req.payload ?? {}) as {
+    readonly expectedRevisionSeq: number;
+    readonly request: BindJiraEvidenceRequest;
+  };
+  return defaultLineLockService.bindCustomJiraEvidenceTicket({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    expectedRevisionSeq: payload.expectedRevisionSeq,
+    callerAccountId: ctx.accountId,
+    request: payload.request
   });
 });
 
@@ -349,6 +409,10 @@ export async function rovoSimulateCutoverHandler(payload: {
 
 export async function rovoCompareBaselinesHandler(payload: { readonly issueKey?: string }) {
   return rovoHandlers.compareBaselines(payload);
+}
+
+export async function rovoFleetOverviewHandler(payload: { readonly projectKey?: string }) {
+  return rovoHandlers.inspectProjectFleet(payload);
 }
 
 export * from "./ports";

@@ -38,7 +38,8 @@ async function main() {
     { module: "forge/index", func: "migrationQueueConsumerHandler" },
     { module: "forge/index", func: "rovoInspectEcoHandler" },
     { module: "forge/index", func: "rovoSimulateCutoverHandler" },
-    { module: "forge/index", func: "rovoCompareBaselinesHandler" }
+    { module: "forge/index", func: "rovoCompareBaselinesHandler" },
+    { module: "forge/index", func: "rovoFleetOverviewHandler" }
   ];
 
   const entryPoints = getEntryPoints(handlers);
@@ -54,6 +55,10 @@ async function main() {
     {
       key: "main-ui",
       path: path.join(appDirectory, "src", "frontend", "index.tsx")
+    },
+    {
+      key: "fleet-ui",
+      path: path.join(appDirectory, "src", "frontend", "fleetPage.tsx")
     }
   ]);
   console.log(

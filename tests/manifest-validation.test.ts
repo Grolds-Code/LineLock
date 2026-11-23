@@ -15,7 +15,7 @@ const { validate } = require("@forge/manifest") as {
 };
 
 describe("Forge Manifest Official Schema & Trust-Boundary Validation (@forge/manifest)", () => {
-  it("validates manifest.yml with zero schema errors, zero external egress (Runs on Atlassian), and strictly GET read-only Rovo actions", async () => {
+  it("validates manifest.yml with zero schema errors, zero external egress (Runs on Atlassian), projectPage, rovo:mcp, and 4 strictly GET read-only Rovo/MCP actions", async () => {
     const manifestPath = join(process.cwd(), "manifest.yml");
     const result = await validate(false, manifestPath);
 
@@ -29,10 +29,14 @@ describe("Forge Manifest Official Schema & Trust-Boundary Validation (@forge/man
     const typed = result.manifestObject?.typedContent as
       | {
           modules?: {
+            "jira:issuePanel"?: readonly { key: string }[];
+            "jira:projectPage"?: readonly { key: string; layout?: string }[];
             "rovo:agent"?: readonly { key: string; actions?: readonly string[] }[];
+            "rovo:mcp"?: readonly { key: string; name?: string; tools?: readonly string[] }[];
             action?: readonly { key: string; actionVerb?: string }[];
           };
           permissions?: {
+            scopes?: readonly string[];
             external?: unknown;
           };
         }
@@ -41,11 +45,30 @@ describe("Forge Manifest Official Schema & Trust-Boundary Validation (@forge/man
     expect(typed?.modules).toBeDefined();
     // Preserve Runs on Atlassian eligibility: zero external egress permissions
     expect(typed?.permissions?.external).toBeUndefined();
+    expect(typed?.permissions?.scopes).toEqual([
+      "storage:app",
+      "read:jira-work",
+      "write:jira-work",
+      "read:jira-user"
+    ]);
 
-    // Verify Rovo agent exists and EVERY exposed Rovo action is strictly read-only (actionVerb: GET)
+    // Verify space-wide Fleet Assurance project page + issue panel
+    expect(typed?.modules?.["jira:issuePanel"]).toHaveLength(1);
+    expect(typed?.modules?.["jira:projectPage"]).toHaveLength(1);
+    expect(typed?.modules?.["jira:projectPage"]?.[0]?.key).toBe("ll-fleet-page");
+
+    // Verify Rovo agent AND Atlassian MCP server expose all 4 read-only GET actions
     expect(typed?.modules?.["rovo:agent"]).toHaveLength(1);
+    expect(typed?.modules?.["rovo:mcp"]).toHaveLength(1);
+    expect(typed?.modules?.["rovo:mcp"]?.[0]?.tools).toEqual([
+      "ll-act-inspect-eco",
+      "ll-act-sim-cutover",
+      "ll-act-baselines",
+      "ll-act-fleet-status"
+    ]);
+
     const actions = typed?.modules?.action ?? [];
-    expect(actions.length).toBe(3);
+    expect(actions.length).toBe(4);
     for (const act of actions) {
       expect(act.actionVerb).toBe("GET");
     }
