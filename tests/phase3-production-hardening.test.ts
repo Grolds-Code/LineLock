@@ -53,7 +53,7 @@ class GroupAwareJiraGatewayStub implements JiraPlatformGateway {
     this.roleGroups.set("ECO", {
       Administrators: ["jira-admins-tenant"]
     });
-    this.userGroups.set("acct-judge-group-admin", ["jira-software-users", "jira-admins-tenant"]);
+    this.userGroups.set("acct-group-admin-lead", ["jira-software-users", "jira-admins-tenant"]);
     this.userGroups.set("acct-unprivileged-dev", ["jira-software-users"]);
   }
 
@@ -176,9 +176,9 @@ class GroupAwareJiraGatewayStub implements JiraPlatformGateway {
     return {
       ok: true,
       checkedAtEpochMs: HELIOS_BASE_EPOCH_MS,
-      callerAccountId: "acct-judge-group-admin",
-      callerDisplayName: "Codegeist Judge",
-      jiraServerBaseUrl: "https://judge-tenant.atlassian.net",
+      callerAccountId: "acct-group-admin-lead",
+      callerDisplayName: "Principal Release Engineer",
+      jiraServerBaseUrl: "https://helios-industrial.atlassian.net",
       jiraDeploymentType: "Cloud",
       issueReachable: this.issuesById.has(params.issueId),
       resolvedRoleCount: 4,
@@ -226,7 +226,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
       projectKey: "ECO",
       ecoIssueId: "66400",
       ecoIssueKey: "ECO-1",
-      callerAccountId: "acct-judge-group-admin"
+      callerAccountId: "acct-group-admin-lead"
     });
     expect(seeded.evaluation?.gateState).toBe("AWAITING_ATTESTATION");
 
@@ -234,7 +234,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
       projectKey: "ECO",
       ecoIssueId: "66400",
       expectedRevisionSeq: seeded.workspace!.revisionSeq,
-      callerAccountId: "acct-judge-group-admin",
+      callerAccountId: "acct-group-admin-lead",
       mode: "DEMO_SOLO_ADMIN"
     });
 
@@ -252,25 +252,25 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
       })
     ).rejects.toBeInstanceOf(AuthorizationError);
 
-    // Judge in `jira-admins-tenant` group signs out-of-the-box without direct user-actor setup
+    // Group-assigned admin (`jira-admins-tenant`) signs out-of-the-box without direct user-actor setup
     const signed = await service.recordHumanAttestation({
       projectKey: "ECO",
       ecoIssueId: "66400",
       expectedRevisionSeq: soloView.workspace!.revisionSeq,
       expectedSnapshotSha256: soloView.evaluation!.snapshotSha256,
       expectedApprovalGeneration: soloView.workspace!.eco.approvalGeneration,
-      signerAccountId: "acct-judge-group-admin",
+      signerAccountId: "acct-group-admin-lead",
       roleName: "Administrators",
       rationale: "Verified via default Jira admin group actor."
     });
     expect(signed.evaluation.gateState).toBe("READY_FOR_RELEASE_TRANSITION");
 
     // If removed from `jira-admins-tenant` BEFORE transition, live workflow validator revokes trust and blocks!
-    jira.userGroups.set("acct-judge-group-admin", ["jira-software-users"]);
+    jira.userGroups.set("acct-group-admin-lead", ["jira-software-users"]);
     const blockedGate = await service.validateReleaseTransition({
       projectKey: "ECO",
       ecoIssueId: "66400",
-      actorAccountId: "acct-judge-group-admin"
+      actorAccountId: "acct-group-admin-lead"
     });
     expect(blockedGate.result).toBe(false);
     expect(blockedGate.errorMessage).toContain("AWAITING_ATTESTATION");
@@ -284,13 +284,13 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
       projectKey: "ECO",
       ecoIssueId: "66400",
       ecoIssueKey: "ECO-1",
-      callerAccountId: "acct-judge-group-admin"
+      callerAccountId: "acct-group-admin-lead"
     });
     const solo = await service.switchGovernancePolicyMode({
       projectKey: "ECO",
       ecoIssueId: "66400",
       expectedRevisionSeq: seeded.workspace!.revisionSeq,
-      callerAccountId: "acct-judge-group-admin",
+      callerAccountId: "acct-group-admin-lead",
       mode: "DEMO_SOLO_ADMIN"
     });
     await service.recordHumanAttestation({
@@ -299,7 +299,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
       expectedRevisionSeq: solo.workspace!.revisionSeq,
       expectedSnapshotSha256: solo.evaluation!.snapshotSha256,
       expectedApprovalGeneration: solo.workspace!.eco.approvalGeneration,
-      signerAccountId: "acct-judge-group-admin",
+      signerAccountId: "acct-group-admin-lead",
       roleName: "Administrators",
       rationale: "Ready for release."
     });
@@ -307,7 +307,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
     const gateRes = await service.validateReleaseTransition({
       projectKey: "ECO",
       ecoIssueId: "66400",
-      actorAccountId: "acct-judge-group-admin"
+      actorAccountId: "acct-group-admin-lead"
     });
     expect(gateRes.result).toBe(true);
 
@@ -315,7 +315,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
     const whileInProgress = await service.getWorkspaceView({
       projectKey: "ECO",
       ecoIssueId: "66400",
-      callerAccountId: "acct-judge-group-admin"
+      callerAccountId: "acct-group-admin-lead"
     });
     expect(whileInProgress.workspace?.finalizedReleaseReceipt).toBeNull();
     expect(whileInProgress.evaluation?.gateState).toBe("READY_FOR_RELEASE_TRANSITION");
@@ -325,7 +325,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
     const refreshedImmediately = await service.getWorkspaceView({
       projectKey: "ECO",
       ecoIssueId: "66400",
-      callerAccountId: "acct-judge-group-admin"
+      callerAccountId: "acct-group-admin-lead"
     });
     expect(refreshedImmediately.evaluation?.gateState).toBe("RELEASE_TRANSITIONED_VERIFIED");
     expect(refreshedImmediately.workspace?.finalizedReleaseReceipt?.receiptId).toMatch(/^receipt-/);
@@ -338,7 +338,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
       projectKey: "ECO",
       ecoIssueId: "66400",
       ecoIssueKey: "ECO-1",
-      callerAccountId: "acct-judge-group-admin"
+      callerAccountId: "acct-group-admin-lead"
     });
 
     // 1. Temporary lot deviation [SN 3500..7000) on VAR_400V splits VAR_400V into 3 slices + VAR_800V into 1 slice = 4 slices!
@@ -409,13 +409,13 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
       projectKey: "ECO",
       ecoIssueId: "66400",
       ecoIssueKey: "ECO-1",
-      callerAccountId: "acct-judge-group-admin"
+      callerAccountId: "acct-group-admin-lead"
     });
     const solo = await service.switchGovernancePolicyMode({
       projectKey: "ECO",
       ecoIssueId: "66400",
       expectedRevisionSeq: seeded.workspace!.revisionSeq,
-      callerAccountId: "acct-judge-group-admin",
+      callerAccountId: "acct-group-admin-lead",
       mode: "DEMO_SOLO_ADMIN"
     });
     const signed = await service.recordHumanAttestation({
@@ -424,7 +424,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
       expectedRevisionSeq: solo.workspace!.revisionSeq,
       expectedSnapshotSha256: solo.evaluation!.snapshotSha256,
       expectedApprovalGeneration: solo.workspace!.eco.approvalGeneration,
-      signerAccountId: "acct-judge-group-admin",
+      signerAccountId: "acct-group-admin-lead",
       roleName: "Administrators",
       rationale: "Initial qualification approval."
     });
@@ -436,7 +436,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
     const driftedView = await service.getWorkspaceView({
       projectKey: "ECO",
       ecoIssueId: "66400",
-      callerAccountId: "acct-judge-group-admin"
+      callerAccountId: "acct-group-admin-lead"
     });
     expect(driftedView.evaluation?.gateState).toBe("BLOCKED_INVALIDATED");
     expect(driftedView.evidenceIntegrity?.[0]?.hashMatches).toBe(false);
@@ -448,7 +448,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
         projectKey: "ECO",
         ecoIssueId: "66400",
         expectedRevisionSeq: driftedView.workspace!.revisionSeq,
-        callerAccountId: "acct-judge-group-admin"
+        callerAccountId: "acct-group-admin-lead"
       })
     ).rejects.toThrow(/must be "done"/);
 
@@ -459,7 +459,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
       projectKey: "ECO",
       ecoIssueId: "66400",
       expectedRevisionSeq: driftedView.workspace!.revisionSeq,
-      callerAccountId: "acct-judge-group-admin"
+      callerAccountId: "acct-group-admin-lead"
     });
     expect(repinned.evidenceIntegrity?.every((r) => r.hashMatches)).toBe(true);
     expect(repinned.workspace?.eco.approvalGeneration).toBe(
@@ -488,7 +488,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
     const commentRes = await service.postAuditRecordComment({
       projectKey: "ECO",
       ecoIssueId: "66400",
-      callerAccountId: "acct-judge-group-admin"
+      callerAccountId: "acct-group-admin-lead"
     });
     expect(commentRes.commentId).toBe("9901");
     expect(jira.postedComments).toHaveLength(1);

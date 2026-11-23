@@ -94,7 +94,7 @@ npm run verify
 
 ---
 
-## Clean Jira Cloud Installation & Judge Walkthrough (5 Minutes)
+## Jira Cloud Deployment & Quickstart
 
 ### 1. Deploy & Install
 ```bash
@@ -102,7 +102,6 @@ npx forge login
 npx forge deploy -e production
 npx forge install -e production --product jira --site <your-site>.atlassian.net
 ```
-*(Or install in 1 click using the Developer Console Installation Link provided in the submission notes.)*
 
 > **Browser Note:** If using **Brave Browser**, toggle **Brave Shields OFF** on `<your-site>.atlassian.net` so Brave does not block Forge UI Kit 2's cross-origin `atlassian-dev.net` iframe bridge.
 

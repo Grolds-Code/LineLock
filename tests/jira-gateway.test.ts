@@ -105,7 +105,7 @@ vi.mock("@forge/api", () => {
       };
     }
 
-    if (pathStr.includes("/rest/api/3/user/groups?accountId=acct-group-admin-judge")) {
+    if (pathStr.includes("/rest/api/3/user/groups?accountId=acct-group-admin-lead")) {
       return {
         ok: true,
         status: 200,
@@ -182,11 +182,11 @@ describe("ForgeJiraPlatformGateway — @forge/api REST Contract", () => {
     const roles = await gateway.fetchProjectRoleMembers(
       "ECO",
       ["Lead Engineers", "Quality Approvers", "Administrators", "Nonexistent Role"],
-      ["acct-group-admin-judge", "acct-regular-user"]
+      ["acct-group-admin-lead", "acct-regular-user"]
     );
     expect(roles["Lead Engineers"]).toEqual(["acct-lead-eng-1"]);
     expect(roles["Quality Approvers"]).toEqual(["acct-qa-approver-1"]);
-    expect(roles["Administrators"]).toEqual(["acct-group-admin-judge"]);
+    expect(roles["Administrators"]).toEqual(["acct-group-admin-lead"]);
     expect(roles["Nonexistent Role"]).toEqual([]);
 
     const commentRes = await gateway.postIssueComment({
@@ -208,9 +208,9 @@ describe("ForgeJiraPlatformGateway — @forge/api REST Contract", () => {
       const roles = await gateway.fetchProjectRoleMembers(
         "ECO",
         ["Administrators"],
-        ["acct-group-admin-judge"]
+        ["acct-group-admin-lead"]
       );
-      expect(roles["Administrators"]).toEqual(["acct-group-admin-judge"]);
+      expect(roles["Administrators"]).toEqual(["acct-group-admin-lead"]);
     } finally {
       ctl.__setSimulateAsAppUnavailableToken(false);
     }

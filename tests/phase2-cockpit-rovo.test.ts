@@ -232,7 +232,7 @@ describe("Phase 2 — Live Jira Provisioner, Counterfactual Simulator, Policy Go
       "ECO-7"
     ]);
 
-    // Judge tampers with ECO-2 description directly in Jira (status remains Done, timestamp newer)
+    // Simulate post-approval edit of ECO-2 description directly in Jira (status remains Done, timestamp newer)
     const eco2Id = provisionedView.evidenceIntegrity![0]!.jiraIssueId;
     jira.tamperIssueDescription(eco2Id, "Edited post-approval: lowered bus voltage to 200V!");
 
