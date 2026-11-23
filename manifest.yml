@@ -51,15 +51,6 @@ modules:
         - ll-act-baselines
         - ll-act-fleet-status
 
-  rovo:mcp:
-    - key: ll-assurance-mcp
-      name: LineLock Verification MCP
-      tools:
-        - ll-act-inspect-eco
-        - ll-act-sim-cutover
-        - ll-act-baselines
-        - ll-act-fleet-status
-
   action:
     - key: ll-act-inspect-eco
       name: Inspect ECO Assurance State

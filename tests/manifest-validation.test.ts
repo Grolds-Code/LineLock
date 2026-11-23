@@ -15,7 +15,7 @@ const { validate } = require("@forge/manifest") as {
 };
 
 describe("Forge Manifest Official Schema & Trust-Boundary Validation (@forge/manifest)", () => {
-  it("validates manifest.yml with zero schema errors, zero external egress (Runs on Atlassian), projectPage, rovo:mcp, and 4 strictly GET read-only Rovo/MCP actions", async () => {
+  it("validates manifest.yml with zero schema errors, zero external egress (Runs on Atlassian), projectPage, rovo:agent, and 4 strictly GET read-only Rovo actions", async () => {
     const manifestPath = join(process.cwd(), "manifest.yml");
     const result = await validate(false, manifestPath);
 
@@ -32,7 +32,7 @@ describe("Forge Manifest Official Schema & Trust-Boundary Validation (@forge/man
             "jira:issuePanel"?: readonly { key: string }[];
             "jira:projectPage"?: readonly { key: string; layout?: string }[];
             "rovo:agent"?: readonly { key: string; actions?: readonly string[] }[];
-            "rovo:mcp"?: readonly { key: string; name?: string; tools?: readonly string[] }[];
+            "rovo:mcp"?: unknown;
             action?: readonly { key: string; actionVerb?: string }[];
           };
           permissions?: {
@@ -57,10 +57,12 @@ describe("Forge Manifest Official Schema & Trust-Boundary Validation (@forge/man
     expect(typed?.modules?.["jira:projectPage"]).toHaveLength(1);
     expect(typed?.modules?.["jira:projectPage"]?.[0]?.key).toBe("ll-fleet-page");
 
-    // Verify Rovo agent AND Atlassian MCP server expose all 4 read-only GET actions
+    // Ensure rovo:mcp Preview is omitted so Jira-only installations (--product jira) never trigger UNAVAILABLE_TOKEN_ERROR
+    expect(typed?.modules?.["rovo:mcp"]).toBeUndefined();
+
+    // Verify Rovo agent exposes all 4 read-only GET actions
     expect(typed?.modules?.["rovo:agent"]).toHaveLength(1);
-    expect(typed?.modules?.["rovo:mcp"]).toHaveLength(1);
-    expect(typed?.modules?.["rovo:mcp"]?.[0]?.tools).toEqual([
+    expect(typed?.modules?.["rovo:agent"]?.[0]?.actions).toEqual([
       "ll-act-inspect-eco",
       "ll-act-sim-cutover",
       "ll-act-baselines",

@@ -8,7 +8,7 @@ LineLock enforces five defense-in-depth engineering invariants across its pure v
 2. **Pure Deterministic Kernel Isolation:** `src/core/` contains zero `@forge/*`, `fetch`, or non-deterministic clock imports (enforced by static source scanning in [`tests/phase3-production-hardening.test.ts`](tests/phase3-production-hardening.test.ts)). All numeric predicates execute via exact `BigInt` scaled decimals (`mantissa * 10^scale`) under Strong Kleene ($K_3$) three-valued logic (`TRUE | FALSE | UNKNOWN`).
 3. **Parameterized Single-Statement SQL & Optimistic CAS:** Every Forge SQL (`@forge/sql`) query uses `.prepare(...).bindParams(...)` bound parameters—never string interpolation—and enforces conditional Compare-and-Swap (`WHERE eco_issue_id = ? AND revision_seq = ?`, checking `affectedRows === 1`).
 4. **ABA-Resistant Human Governance & Live RBAC:** Every `RoleAttestation` cryptographically binds `(snapshotSha256, approvalGeneration, policyVersion)` and re-verifies live Jira Project Role membership (both direct `actorUser` and group `atlassian-group-role-actor` memberships) on every evaluation.
-5. **Read-Only AI / MCP Boundary:** Every Rovo action and Atlassian MCP tool (`ll-act-inspect-eco`, `ll-act-sim-cutover`, `ll-act-baselines`, `ll-act-fleet-status`) is strictly `actionVerb: GET` and verified never to mutate Forge SQL or override `jira:workflowValidator`.
+5. **Read-Only Rovo AI Boundary:** Every Rovo action (`ll-act-inspect-eco`, `ll-act-sim-cutover`, `ll-act-baselines`, `ll-act-fleet-status`) is strictly `actionVerb: GET` and verified never to mutate Forge SQL or override `jira:workflowValidator`.
 
 ## Reporting a Vulnerability
 

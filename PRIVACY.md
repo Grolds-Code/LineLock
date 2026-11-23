@@ -14,8 +14,8 @@ LineLock accesses only the minimum Atlassian scopes required to verify Engineeri
 - `read:jira-user`: Verifies live Jira Project Role membership (including group-assigned role actors via `/rest/api/3/user/groups`) when validating human role attestations.
 - `storage:app`: Persists per-ECO verification workspaces, monotonic `approvalGeneration` counters, optimistic Compare-and-Swap (`revision_seq`) rows, and generation-bound `RoleAttestation` records in per-installation Atlassian Forge SQL (`@forge/sql`).
 
-## 3. AI / Rovo & Atlassian MCP Boundary
-LineLock's Rovo Agent (`LineLock Assurance Analyst`) and Atlassian MCP server (`LineLock Verification MCP`) invoke strictly read-only (`actionVerb: GET`) deterministic kernel functions within Atlassian's tenant boundary. LineLock does not transmit customer data to third-party LLM providers.
+## 3. AI / Rovo Boundary
+LineLock's Rovo Agent (`LineLock Assurance Analyst`) invokes strictly read-only (`actionVerb: GET`) deterministic kernel functions (`ll-act-inspect-eco`, `ll-act-sim-cutover`, `ll-act-baselines`, `ll-act-fleet-status`) within Atlassian's tenant boundary. LineLock does not transmit customer data to third-party LLM providers.
 
 ## 4. Data Retention & Deletion
 All workspace state resides inside the customer's tenant-isolated Atlassian Forge SQL database (`linelock_eco_workspaces` and `linelock_provisioning_audit`). Uninstalling LineLock from an Atlassian Cloud site schedules tenant storage deletion in accordance with Atlassian Forge platform data-lifecycle policies.

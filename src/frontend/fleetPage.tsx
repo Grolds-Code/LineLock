@@ -234,7 +234,7 @@ const LineLockFleetAssurancePage: React.FC = () => {
               color="teal"
             />
             <Tag text="Runs on Atlassian" color="blue" />
-            <Tag text="Atlassian Rovo + MCP Ready" color="green" />
+            <Tag text="Atlassian Rovo Analyst Ready" color="green" />
             {overview ? (
               <Code>{`Total Slice × Obligations Audited: ${bc.totalSliceObligations}`}</Code>
             ) : null}
