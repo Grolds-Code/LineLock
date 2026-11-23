@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { buildReleaseAssuranceMarkdown } from "../core/auditPacket";
 import {
   evaluateB0TimestampStatus,
   evaluateB1UntypedSuspectGraph,
@@ -121,7 +122,7 @@ export class LineLockService {
       };
     }
 
-    const workspace = await this.store.getEcoWorkspace(params.ecoIssueId);
+    let workspace = await this.store.getEcoWorkspace(params.ecoIssueId);
     if (!workspace) {
       return {
         callerAccountId: params.callerAccountId,
@@ -132,16 +133,32 @@ export class LineLockService {
       };
     }
 
-    const { evaluation, evidenceIntegrity } = await this.evaluateWorkspaceWithIntegrity(
+    workspace = await this.maybeFinalizePendingTransitionIntent(
       params.projectKey,
+      params.ecoIssueId,
       workspace
     );
+
+    const { evaluation, evidenceIntegrity } = await this.evaluateWorkspaceWithIntegrity(
+      params.projectKey,
+      workspace,
+      undefined,
+      undefined,
+      params.callerAccountId
+    );
+    const releaseAssuranceMarkdown = buildReleaseAssuranceMarkdown({
+      catalog: workspace.catalog,
+      eco: workspace.eco,
+      evaluation,
+      finalizedReceipt: workspace.finalizedReleaseReceipt
+    });
     return {
       callerAccountId: params.callerAccountId,
       provisioning,
       workspace,
       evaluation,
-      evidenceIntegrity
+      evidenceIntegrity,
+      releaseAssuranceMarkdown
     };
   }
 
@@ -557,7 +574,15 @@ export class LineLockService {
     }
 
     const requiredRoles = this.collectAllPossibleRoles(ws.catalog);
-    const trustedRoles = await this.jira.fetchProjectRoleMembers(params.projectKey, requiredRoles);
+    const candidateAccountIds = [
+      params.signerAccountId,
+      ...ws.attestations.map((a) => a.signerAccountId)
+    ];
+    const trustedRoles = await this.jira.fetchProjectRoleMembers(
+      params.projectKey,
+      requiredRoles,
+      candidateAccountIds
+    );
     const roleMembers = trustedRoles[params.roleName] ?? [];
     if (!roleMembers.includes(params.signerAccountId)) {
       throw new AuthorizationError(
@@ -620,6 +645,115 @@ export class LineLockService {
       trustedRoles
     );
     return { workspace: updated, evaluation };
+  }
+
+  /**
+   * Re-pins the cryptographic RFC 8785 SHA-256 content hashes of all linked Jira qualification
+   * work items after legitimate test updates. Strictly enforces:
+   * 1. Every linked Jira qualification work item must be reachable and in Done status.
+   * 2. Optimistic CAS on `expectedRevisionSeq`.
+   * 3. Monotonic `approvalGeneration` increment (`+1`), invalidating prior human attestations so
+   *    re-pinned evidence can never inherit pre-edit signatures silently.
+   */
+  public async repinLiveEvidenceHashes(params: {
+    readonly projectKey: string;
+    readonly ecoIssueId: string;
+    readonly expectedRevisionSeq: number;
+    readonly callerAccountId: string;
+  }): Promise<EcoWorkspaceView> {
+    await this.ensureProvisionedOrThrow();
+
+    const ws = await this.mustLoadWorkspace(params.ecoIssueId);
+    if (ws.revisionSeq !== params.expectedRevisionSeq) {
+      throw new ConcurrentModificationError(
+        `Stale workspace revisionSeq ${params.expectedRevisionSeq}; stored revisionSeq is ${ws.revisionSeq}.`
+      );
+    }
+
+    const { liveEco, liveIssuesById } = await this.fetchLiveVerificationContext(
+      params.projectKey,
+      ws
+    );
+
+    const updatedEvidence = ws.catalog.evidenceRecords.map((ev) => {
+      const live = liveIssuesById[ev.jiraIssueId];
+      if (!live) {
+        throw new Error(
+          `Cannot re-pin evidence "${ev.evidenceId}": linked Jira issue "${ev.jiraIssueKey}" (id=${ev.jiraIssueId}) is unreachable.`
+        );
+      }
+      if (live.statusCategoryKey.toLowerCase() !== "done") {
+        throw new Error(
+          `Cannot re-pin evidence "${ev.evidenceId}": linked Jira issue "${live.issueKey}" is in statusCategory "${live.statusCategoryKey}" (must be "done").`
+        );
+      }
+      return {
+        ...ev,
+        jiraIssueKey: live.issueKey,
+        pinnedIssueStateHash: computePinnedIssueStateHash(live)
+      };
+    });
+
+    await this.store.casUpdateEcoWorkspace(ws.revisionSeq, {
+      ecoIssueId: ws.ecoIssueId,
+      updatedAtEpochMs: this.now(),
+      catalog: {
+        ...ws.catalog,
+        evidenceRecords: updatedEvidence
+      },
+      eco: {
+        ...ws.eco,
+        lastEditorAccountId: params.callerAccountId,
+        approvalGeneration: ws.eco.approvalGeneration + 1,
+        liveEcoStatusCategoryKey: liveEco.statusCategoryKey
+      },
+      proposedOperations: ws.proposedOperations,
+      attestations: ws.attestations,
+      pendingTransitionIntent: null,
+      finalizedReleaseReceipt: null,
+      unvalidatedDriftDetected:
+        ws.unvalidatedDriftDetected || liveEco.statusCategoryKey.toLowerCase() === "done"
+    });
+
+    return this.getWorkspaceView({
+      projectKey: params.projectKey,
+      ecoIssueId: params.ecoIssueId,
+      callerAccountId: params.callerAccountId
+    });
+  }
+
+  /**
+   * Generates a deterministic Release Assurance & Effectivity Disposition Record against live
+   * Jira state and posts it as an immutable audit comment on the ECO work item.
+   */
+  public async postAuditRecordComment(params: {
+    readonly projectKey: string;
+    readonly ecoIssueId: string;
+    readonly callerAccountId: string;
+  }): Promise<{
+    readonly commentId: string;
+    readonly view: EcoWorkspaceView;
+  }> {
+    const view = await this.getWorkspaceView({
+      projectKey: params.projectKey,
+      ecoIssueId: params.ecoIssueId,
+      callerAccountId: params.callerAccountId
+    });
+
+    if (!view.workspace || !view.evaluation || !view.releaseAssuranceMarkdown) {
+      throw new Error("Initialize the ECO verification workspace before exporting an audit record.");
+    }
+    if (!this.jira.postIssueComment) {
+      throw new Error("Jira comment export is not configured on the active platform gateway.");
+    }
+
+    const targetIssue = view.workspace.eco.ecoJiraKey || params.ecoIssueId;
+    const { commentId } = await this.jira.postIssueComment({
+      issueIdOrKey: targetIssue,
+      markdownText: view.releaseAssuranceMarkdown
+    });
+
+    return { commentId, view };
   }
 
   public async validateReleaseTransition(params: {
@@ -843,7 +977,12 @@ export class LineLockService {
     readonly ecoIssueId: string;
   }) {
     await this.ensureProvisionedOrThrow();
-    const ws = await this.mustLoadWorkspace(params.ecoIssueId);
+    let ws = await this.mustLoadWorkspace(params.ecoIssueId);
+    ws = await this.maybeFinalizePendingTransitionIntent(
+      params.projectKey,
+      params.ecoIssueId,
+      ws
+    );
     const { liveEco, trustedRoles, liveIssuesById } = await this.fetchLiveVerificationContext(
       params.projectKey,
       ws
@@ -915,51 +1054,132 @@ export class LineLockService {
     catalog: FamilyCatalog,
     req: CounterfactualRequest
   ): ChangeOperation[] {
-    const safeSerial =
-      Number.isSafeInteger(req.kind === "AMBIENT_ENVELOPE_SHIFT" ? 1000 : req.serialFrom) &&
-      (req.kind === "AMBIENT_ENVELOPE_SHIFT" || req.serialFrom >= 1000)
-        ? req.kind === "AMBIENT_ENVELOPE_SHIFT"
-          ? 1000
-          : req.serialFrom
-        : 5000;
-
-    if (req.kind === "CAP_REV_C_CUTOVER") {
-      return buildHeliosCapRevCSubstitution(catalog, req.targetVariants, safeSerial);
-    }
-    if (req.kind === "SEAL_REV_B_CUTOVER") {
-      return buildSerialScopedSubstitutionOps({
-        currentEdges: catalog.baselineBomEdges,
-        allVariantIds: catalog.variants.map((v) => v.variantId),
-        parentItemRevId: "PACK-HELIOS@A",
-        slotKey: "ENCLOSURE_SEAL_S1",
-        newChildItemRevId: "SEAL-EPDM@B",
-        newEdgeIdPrefix: "E-CF-SEAL",
-        targetVariants: req.targetVariants,
-        serialFrom: safeSerial,
-        serialTo: null
-      });
-    }
-    const targetVar = catalog.variants.find((v) => v.variantId === req.variantId);
-    const baseBusV = targetVar?.operatingEnvelope["bus_voltage"] ?? qty(400, 0, "V");
-    const baseAuxV = targetVar?.operatingEnvelope["aux_rail_voltage"] ?? qty(12, 0, "V");
-    return [
-      {
-        op: "SET_VARIANT_ENVELOPE",
-        variantId: req.variantId,
-        operatingEnvelope: {
-          bus_voltage: baseBusV,
-          max_ambient: qty(Math.trunc(req.maxAmbientC), 0, "degC"),
-          min_ambient: qty(Math.trunc(req.minAmbientC), 0, "degC"),
-          aux_rail_voltage: baseAuxV
+    if (req.kind === "AMBIENT_ENVELOPE_SHIFT") {
+      const targetVar = catalog.variants.find((v) => v.variantId === req.variantId);
+      const baseBusV = targetVar?.operatingEnvelope["bus_voltage"] ?? qty(400, 0, "V");
+      const baseAuxV = targetVar?.operatingEnvelope["aux_rail_voltage"] ?? qty(12, 0, "V");
+      return [
+        {
+          op: "SET_VARIANT_ENVELOPE",
+          variantId: req.variantId,
+          operatingEnvelope: {
+            bus_voltage: baseBusV,
+            max_ambient: qty(Math.trunc(req.maxAmbientC), 0, "degC"),
+            min_ambient: qty(Math.trunc(req.minAmbientC), 0, "degC"),
+            aux_rail_voltage: baseAuxV
+          }
         }
+      ];
+    }
+
+    const safeSerial =
+      Number.isSafeInteger(req.serialFrom) && req.serialFrom >= 1000 ? req.serialFrom : 5000;
+    const safeSerialTo =
+      req.serialTo !== undefined &&
+      req.serialTo !== null &&
+      Number.isSafeInteger(req.serialTo) &&
+      req.serialTo > safeSerial
+        ? req.serialTo
+        : null;
+
+    const allVariantIds = catalog.variants.map((v) => v.variantId);
+
+    switch (req.kind) {
+      case "CAP_REV_C_CUTOVER":
+        return buildSerialScopedSubstitutionOps({
+          currentEdges: catalog.baselineBomEdges,
+          allVariantIds,
+          parentItemRevId: "HV_INV@A",
+          slotKey: "DC_LINK_CAP_C14",
+          newChildItemRevId: "CAP-1210@C",
+          newEdgeIdPrefix: "E-CF-CAPC",
+          targetVariants: req.targetVariants,
+          serialFrom: safeSerial,
+          serialTo: safeSerialTo
+        });
+      case "CAP_REV_D_DRAFT_CUTOVER":
+        return buildSerialScopedSubstitutionOps({
+          currentEdges: catalog.baselineBomEdges,
+          allVariantIds,
+          parentItemRevId: "HV_INV@A",
+          slotKey: "DC_LINK_CAP_C14",
+          newChildItemRevId: "CAP-1210@D_DRAFT",
+          newEdgeIdPrefix: "E-CF-CAPD",
+          targetVariants: req.targetVariants,
+          serialFrom: safeSerial,
+          serialTo: safeSerialTo
+        });
+      case "GATE_DRIVER_REV_B_CUTOVER":
+        return buildSerialScopedSubstitutionOps({
+          currentEdges: catalog.baselineBomEdges,
+          allVariantIds,
+          parentItemRevId: "HV_INV@A",
+          slotKey: "GATE_DRIVER_U3",
+          newChildItemRevId: "DRV-ISO@B",
+          newEdgeIdPrefix: "E-CF-DRVB",
+          targetVariants: req.targetVariants,
+          serialFrom: safeSerial,
+          serialTo: safeSerialTo
+        });
+      case "SEAL_REV_B_CUTOVER":
+        return buildSerialScopedSubstitutionOps({
+          currentEdges: catalog.baselineBomEdges,
+          allVariantIds,
+          parentItemRevId: "PACK-HELIOS@A",
+          slotKey: "ENCLOSURE_SEAL_S1",
+          newChildItemRevId: "SEAL-EPDM@B",
+          newEdgeIdPrefix: "E-CF-SEAL",
+          targetVariants: req.targetVariants,
+          serialFrom: safeSerial,
+          serialTo: safeSerialTo
+        });
+    }
+  }
+
+  private async maybeFinalizePendingTransitionIntent(
+    projectKey: string,
+    ecoIssueId: string,
+    ws: StoredEcoWorkspace
+  ): Promise<StoredEcoWorkspace> {
+    if (!ws.pendingTransitionIntent) {
+      return ws;
+    }
+
+    const intentExpired = ws.pendingTransitionIntent.expiresAtEpochMs <= this.now();
+    let ecoReachedDone = false;
+    if (!intentExpired) {
+      try {
+        const liveEco = await this.jira.fetchLiveIssue(ecoIssueId);
+        ecoReachedDone = liveEco.statusCategoryKey.toLowerCase() === "done";
+      } catch {
+        return ws;
       }
-    ];
+    }
+
+    if (!intentExpired && !ecoReachedDone) {
+      return ws;
+    }
+
+    try {
+      await this.reconcileIssueUpdatedEvent({
+        projectKey,
+        updatedIssueId: ecoIssueId,
+        ecoIssueId
+      });
+    } catch (err) {
+      if (!(err instanceof ConcurrentModificationError)) {
+        throw err;
+      }
+    }
+
+    return (await this.store.getEcoWorkspace(ecoIssueId)) ?? ws;
   }
 
   private async fetchLiveVerificationContext(
     projectKey: string,
     ws: StoredEcoWorkspace,
-    cachedRoles?: Record<string, readonly string[]>
+    cachedRoles?: Record<string, readonly string[]>,
+    extraCandidateAccountId?: string
   ): Promise<{
     readonly liveEco: LiveJiraIssueProjection;
     readonly trustedRoles: Record<string, readonly string[]>;
@@ -969,11 +1189,20 @@ export class LineLockService {
       ...new Set(ws.catalog.evidenceRecords.map((ev) => ev.jiraIssueId))
     ];
 
+    const candidateAccountIds = [
+      ...(extraCandidateAccountId ? [extraCandidateAccountId] : []),
+      ...ws.attestations.map((a) => a.signerAccountId)
+    ];
+
     const [liveEco, trustedRoles, ...liveEvidenceList] = await Promise.all([
       this.jira.fetchLiveIssue(ws.ecoIssueId),
       cachedRoles
         ? Promise.resolve(cachedRoles)
-        : this.jira.fetchProjectRoleMembers(projectKey, this.collectAllPossibleRoles(ws.catalog)),
+        : this.jira.fetchProjectRoleMembers(
+            projectKey,
+            this.collectAllPossibleRoles(ws.catalog),
+            candidateAccountIds
+          ),
       ...uniqueEvidenceIssueIds.map(async (issueId) => {
         try {
           return await this.jira.fetchLiveIssue(issueId);
@@ -997,7 +1226,8 @@ export class LineLockService {
     projectKey: string,
     ws: StoredEcoWorkspace,
     cachedRoles?: Record<string, readonly string[]>,
-    overrideEcoStatusCategoryKey?: string
+    overrideEcoStatusCategoryKey?: string,
+    extraCandidateAccountId?: string
   ): Promise<{
     readonly evaluation: VerificationEvaluation;
     readonly evidenceIntegrity: readonly LiveEvidenceIntegrityRow[];
@@ -1005,7 +1235,8 @@ export class LineLockService {
     const { liveEco, trustedRoles, liveIssuesById } = await this.fetchLiveVerificationContext(
       projectKey,
       ws,
-      cachedRoles
+      cachedRoles,
+      extraCandidateAccountId
     );
 
     const effectiveStatus = overrideEcoStatusCategoryKey ?? liveEco.statusCategoryKey;

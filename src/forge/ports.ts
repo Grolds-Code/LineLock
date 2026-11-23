@@ -84,7 +84,8 @@ export interface JiraPlatformGateway {
   ): Promise<LiveJiraIssueProjection & { readonly projectKey: string }>;
   fetchProjectRoleMembers(
     projectKey: string,
-    requiredRoles: readonly string[]
+    requiredRoles: readonly string[],
+    candidateAccountIds?: readonly string[]
   ): Promise<Record<string, readonly string[]>>;
   provisionVerificationIssues(params: {
     readonly projectKey: string;
@@ -92,6 +93,10 @@ export interface JiraPlatformGateway {
     readonly specs: readonly VerificationIssueSeedSpec[];
     readonly onCreatedBeforeTransition?: (createdIssueIds: readonly string[]) => Promise<void>;
   }): Promise<readonly ProvisionedVerificationIssue[]>;
+  postIssueComment?(params: {
+    readonly issueIdOrKey: string;
+    readonly markdownText: string;
+  }): Promise<{ readonly commentId: string }>;
   probeConnectivity(params: {
     readonly projectKey: string;
     readonly issueId: string;
@@ -120,6 +125,7 @@ export interface EcoWorkspaceView {
   readonly workspace: StoredEcoWorkspace | null;
   readonly evaluation: VerificationEvaluation | null;
   readonly evidenceIntegrity?: readonly LiveEvidenceIntegrityRow[];
+  readonly releaseAssuranceMarkdown?: string;
 }
 
 export type ScenarioPresetId =
@@ -133,14 +139,14 @@ export type GovernancePolicyMode = "PRODUCTION_MULTI_ROLE" | "DEMO_SOLO_ADMIN";
 
 export type CounterfactualRequest =
   | {
-      readonly kind: "CAP_REV_C_CUTOVER";
+      readonly kind:
+        | "CAP_REV_C_CUTOVER"
+        | "CAP_REV_D_DRAFT_CUTOVER"
+        | "GATE_DRIVER_REV_B_CUTOVER"
+        | "SEAL_REV_B_CUTOVER";
       readonly targetVariants: "ALL" | readonly string[];
       readonly serialFrom: number;
-    }
-  | {
-      readonly kind: "SEAL_REV_B_CUTOVER";
-      readonly targetVariants: "ALL" | readonly string[];
-      readonly serialFrom: number;
+      readonly serialTo?: number | null;
     }
   | {
       readonly kind: "AMBIENT_ENVELOPE_SHIFT";

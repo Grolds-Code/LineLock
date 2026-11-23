@@ -57,10 +57,22 @@ interface JiraIssueLinkTypesResponse {
 
 interface JiraRoleDetailsResponse {
   readonly actors?: readonly {
+    readonly type?: string;
+    readonly name?: string;
     readonly actorUser?: {
       readonly accountId?: string;
     };
+    readonly actorGroup?: {
+      readonly groupId?: string;
+      readonly name?: string;
+      readonly displayName?: string;
+    };
   }[];
+}
+
+interface JiraUserGroupItem {
+  readonly groupId?: string;
+  readonly name?: string;
 }
 
 interface JiraMyselfResponse {
@@ -95,6 +107,35 @@ function buildAdfDocument(plainText: string): Record<string, unknown> {
           {
             type: "text",
             text: plainText
+          }
+        ]
+      }
+    ]
+  };
+}
+
+function buildAuditCommentAdf(markdownText: string): Record<string, unknown> {
+  return {
+    type: "doc",
+    version: 1,
+    content: [
+      {
+        type: "paragraph",
+        content: [
+          {
+            type: "text",
+            text: "LineLock Deterministic Release Assurance & Effectivity Disposition Record",
+            marks: [{ type: "strong" }]
+          }
+        ]
+      },
+      {
+        type: "codeBlock",
+        attrs: { language: "markdown" },
+        content: [
+          {
+            type: "text",
+            text: markdownText
           }
         ]
       }
@@ -147,7 +188,8 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
 
   public async fetchProjectRoleMembers(
     projectKey: string,
-    requiredRoles: readonly string[]
+    requiredRoles: readonly string[],
+    candidateAccountIds: readonly string[] = []
   ): Promise<Record<string, readonly string[]>> {
     const rolesRes = await api
       .asApp()
@@ -162,17 +204,25 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     }
 
     const roleUrlMap = (await rolesRes.json()) as Record<string, string>;
-    const result: Record<string, readonly string[]> = {};
+    const directUsersByRole = new Map<string, Set<string>>();
+    const groupIdsByRole = new Map<string, Set<string>>();
+    const groupNamesByRole = new Map<string, Set<string>>();
+    let anyRoleHasGroups = false;
 
     for (const roleName of requiredRoles) {
+      const userSet = new Set<string>();
+      const groupIdSet = new Set<string>();
+      const groupNameSet = new Set<string>();
+      directUsersByRole.set(roleName, userSet);
+      groupIdsByRole.set(roleName, groupIdSet);
+      groupNamesByRole.set(roleName, groupNameSet);
+
       const roleUrl = roleUrlMap[roleName];
       if (!roleUrl) {
-        result[roleName] = [];
         continue;
       }
       const match = /\/role\/(\d+)$/.exec(roleUrl);
       if (!match?.[1]) {
-        result[roleName] = [];
         continue;
       }
       const roleId = match[1];
@@ -183,17 +233,69 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
         });
 
       if (!detailRes.ok) {
-        result[roleName] = [];
         continue;
       }
 
       const detail = (await detailRes.json()) as JiraRoleDetailsResponse;
-      const accountIds = (detail.actors ?? [])
-        .map((a) => a.actorUser?.accountId)
-        .filter((id): id is string => Boolean(id));
-      result[roleName] = [...new Set(accountIds)].sort();
+      for (const actor of detail.actors ?? []) {
+        if (actor.actorUser?.accountId) {
+          userSet.add(actor.actorUser.accountId);
+        }
+        const gId = actor.actorGroup?.groupId?.trim();
+        if (gId) {
+          groupIdSet.add(gId);
+          anyRoleHasGroups = true;
+        }
+        for (const rawName of [
+          actor.actorGroup?.name,
+          actor.actorGroup?.displayName,
+          actor.type === "atlassian-group-role-actor" ? actor.name : undefined
+        ]) {
+          const norm = rawName?.trim().toLowerCase();
+          if (norm) {
+            groupNameSet.add(norm);
+            anyRoleHasGroups = true;
+          }
+        }
+      }
     }
 
+    const uniqueCandidates = [
+      ...new Set(candidateAccountIds.map((id) => id.trim()).filter((id) => id.length > 0))
+    ];
+
+    if (anyRoleHasGroups && uniqueCandidates.length > 0) {
+      await Promise.all(
+        uniqueCandidates.map(async (accountId) => {
+          const userGroups = await this.fetchUserGroupsSafe(accountId);
+          if (userGroups.length === 0) return;
+
+          for (const roleName of requiredRoles) {
+            const roleGroupIds = groupIdsByRole.get(roleName);
+            const roleGroupNames = groupNamesByRole.get(roleName);
+            const userSet = directUsersByRole.get(roleName);
+            if (!userSet) continue;
+
+            const matchesGroup = userGroups.some((ug) => {
+              const ugId = ug.groupId?.trim();
+              const ugName = ug.name?.trim().toLowerCase();
+              return (
+                Boolean(ugId && roleGroupIds?.has(ugId)) ||
+                Boolean(ugName && roleGroupNames?.has(ugName))
+              );
+            });
+            if (matchesGroup) {
+              userSet.add(accountId);
+            }
+          }
+        })
+      );
+    }
+
+    const result: Record<string, readonly string[]> = {};
+    for (const roleName of requiredRoles) {
+      result[roleName] = [...(directUsersByRole.get(roleName) ?? [])].sort();
+    }
     return result;
   }
 
@@ -289,6 +391,34 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     return provisioned;
   }
 
+  public async postIssueComment(params: {
+    readonly issueIdOrKey: string;
+    readonly markdownText: string;
+  }): Promise<{ readonly commentId: string }> {
+    const res = await api
+      .asApp()
+      .requestJira(route`/rest/api/3/issue/${params.issueIdOrKey}/comment`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          body: buildAuditCommentAdf(params.markdownText)
+        })
+      });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(
+        `Failed posting Release Assurance comment to "${params.issueIdOrKey}": HTTP ${res.status} (${errText.slice(0, 180)})`
+      );
+    }
+
+    const created = (await res.json()) as { readonly id?: string | number };
+    return { commentId: String(created.id ?? "created") };
+  }
+
   public async probeConnectivity(params: {
     readonly projectKey: string;
     readonly issueId: string;
@@ -316,6 +446,13 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     } catch (err) {
       diagnostics.push(
         `asUser(/rest/api/3/myself) error: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    if (callerAccountId) {
+      const groups = await this.fetchUserGroupsSafe(callerAccountId);
+      diagnostics.push(
+        `asApp(/rest/api/3/user/groups): ${groups.length} group(s) resolved for caller`
       );
     }
 
@@ -387,6 +524,23 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       resolvedRoleCount,
       diagnostics
     };
+  }
+
+  private async fetchUserGroupsSafe(accountId: string): Promise<readonly JiraUserGroupItem[]> {
+    try {
+      const res = await api
+        .asApp()
+        .requestJira(route`/rest/api/3/user/groups?accountId=${accountId}`, {
+          headers: { Accept: "application/json" }
+        });
+      if (!res.ok) {
+        return [];
+      }
+      const parsed = (await res.json()) as unknown;
+      return Array.isArray(parsed) ? (parsed as JiraUserGroupItem[]) : [];
+    } catch {
+      return [];
+    }
   }
 
   private async resolveStandardIssueTypeId(projectKey: string): Promise<string> {

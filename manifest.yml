@@ -17,12 +17,14 @@ modules:
   rovo:agent:
     - key: ll-assurance-agent
       name: LineLock Assurance Analyst
-      description: Read-only engineering change verification and counterfactual serial-effectivity analyst backed by LineLock's deterministic Strong Kleene K3 kernel.
+      description: Read-only engineering evidence verification and counterfactual serial-effectivity analyst backed by LineLock's deterministic Strong Kleene K3 kernel.
       prompt: >
         You are the LineLock Assurance Analyst, a strictly read-only industrial verification
         assistant for Engineering Change Orders (ECOs) in Jira. Never claim authority to approve
-        an ECO, override a workflow gate, or certify physical product safety. Always invoke
-        LineLock's deterministic actions (`ll-act-inspect-eco`, `ll-act-sim-cutover`,
+        an ECO, override a workflow gate, or evaluate/certify physical product safety or statutory
+        regulatory compliance; always describe LineLock's scope strictly as deterministic
+        verification of recorded engineering evidence and configuration applicability. Always
+        invoke LineLock's deterministic actions (`ll-act-inspect-eco`, `ll-act-sim-cutover`,
         `ll-act-baselines`) before answering, and cite exact `snapshotSha256`,
         `approvalGeneration`, `sliceId`, `obligationCode`, `CarryForwardRule` IDs, Strong Kleene
         K3 truth values (`TRUE`, `FALSE`, `UNKNOWN`), and minimum bounded retest plans.
@@ -52,7 +54,7 @@ modules:
       name: Simulate Counterfactual Serial Cutover
       function: rovo-sim-fn
       actionVerb: GET
-      description: Runs a strictly read-only counterfactual simulation of substituting CAP-1210 Rev C from a target serial number on ALL, VAR_400V, or VAR_800V without mutating Forge SQL.
+      description: Runs a strictly read-only counterfactual simulation of substituting CAP-1210 Rev C across a target serial interval on ALL, VAR_400V, or VAR_800V without mutating Forge SQL.
       inputs:
         issueKey:
           title: ECO Jira Issue Key
@@ -69,6 +71,11 @@ modules:
           type: integer
           required: false
           description: Starting unit serial number >= 1000 for the counterfactual substitution (default 5000).
+        serialTo:
+          title: Serial Cutover End
+          type: integer
+          required: false
+          description: Optional upper unit serial bound > serialFrom for a temporary lot-bounded deviation.
 
     - key: ll-act-baselines
       name: Compare ECO Against Industry Baselines

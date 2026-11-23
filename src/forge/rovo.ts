@@ -71,6 +71,7 @@ export function createRovoActionHandlers(params: {
       readonly issueKey?: string;
       readonly variantScope?: string;
       readonly serialFrom?: number;
+      readonly serialTo?: number;
     }) {
       const issue = await resolveIssue(payload?.issueKey);
       const rawScope = (payload?.variantScope ?? "VAR_400V").trim().toUpperCase();
@@ -86,15 +87,23 @@ export function createRovoActionHandlers(params: {
           ? Math.max(1000, Math.trunc(payload.serialFrom))
           : 5000;
 
+      const serialTo =
+        typeof payload?.serialTo === "number" &&
+        Number.isFinite(payload.serialTo) &&
+        Math.trunc(payload.serialTo) > serialFrom
+          ? Math.trunc(payload.serialTo)
+          : null;
+
       const sim = await service.simulateCounterfactual({
         projectKey: issue.projectKey,
         ecoIssueId: issue.issueId,
         request: {
           kind: "CAP_REV_C_CUTOVER",
           targetVariants,
-          serialFrom
+          serialFrom,
+          serialTo
         },
-        includeBaselines: false
+        includeBaselines: true
       });
 
       return {
@@ -102,9 +111,10 @@ export function createRovoActionHandlers(params: {
         mutatedStorage: false,
         issueKey: issue.issueKey,
         simulatedParameters: {
-          componentSubstitution: "HV_INV/DC_LINK_CAP_C14 -> CAP-1210@C (630V X7R 11mOhm)",
+          componentSubstitution: "HV_INV/DC_LINK_CAP_C14 -> CAP-1210@C (630V X7R 10mOhm)",
           targetVariants,
-          serialFrom
+          serialFrom,
+          serialTo
         },
         delta: sim.delta,
         simulatedBlockingReasons: sim.simulatedEvaluation.blockingReasons,

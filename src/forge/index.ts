@@ -247,6 +247,26 @@ resolver.define("signRoleAttestation", async (req) => {
   });
 });
 
+resolver.define("repinLiveEvidenceHashes", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  const payload = (req.payload ?? {}) as { readonly expectedRevisionSeq: number };
+  return defaultLineLockService.repinLiveEvidenceHashes({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    expectedRevisionSeq: payload.expectedRevisionSeq,
+    callerAccountId: ctx.accountId
+  });
+});
+
+resolver.define("postAuditRecordComment", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  return defaultLineLockService.postAuditRecordComment({
+    projectKey: ctx.projectKey,
+    ecoIssueId: ctx.issueId,
+    callerAccountId: ctx.accountId
+  });
+});
+
 export const panelResolverHandler = resolver.getDefinitions();
 
 export async function workflowValidatorHandler(event: {
@@ -322,6 +342,7 @@ export async function rovoSimulateCutoverHandler(payload: {
   readonly issueKey?: string;
   readonly variantScope?: string;
   readonly serialFrom?: number;
+  readonly serialTo?: number;
 }) {
   return rovoHandlers.simulateSerialCutover(payload);
 }

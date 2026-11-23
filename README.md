@@ -40,7 +40,8 @@ LineLock/
 │   │   ├── intervals.ts              # Elementary serial-interval slicer & inverse change operations
 │   │   ├── remediation.ts            # Exact branch-and-bound set cover (<= 16x20) + greedy fallback
 │   │   ├── verifier.ts               # Footprint checker, carry-forward engine, ABA & gate state machine
-│   │   └── baselines.ts              # Baselines B0 (timestamp), B1 (suspect graph), B2 (version + envelope)
+│   │   ├── baselines.ts              # Baselines B0 (timestamp), B1 (suspect graph), B2 (version + envelope)
+│   │   └── auditPacket.ts            # Deterministic DVP&R Release Assurance & Effectivity Markdown exporter
 │   ├── scenarios/
 │   │   ├── heliosBatteryPack.ts      # Reference EV traction battery pack catalog (VAR_400V, VAR_800V)
 │   │   └── counterexamples.ts        # Adversarial counterexamples CE-01..CE-11b & 16-scenario benchmark corpus
@@ -48,16 +49,17 @@ LineLock/
 │   │   ├── ports.ts                  # Explicit SQL provisioning states, workspace schema, counterfactual types
 │   │   ├── provisioning.ts           # Async DDL schema migration manager (@forge/sql MigrationRunner)
 │   │   ├── sqlStore.ts               # Conditional CAS store on @forge/sql (affectedRows === 1) + TiDB simulator
-│   │   ├── jiraGateway.ts            # Live @forge/api REST v3 gateway & 6-ticket qualification provisioner
-│   │   ├── service.ts                # LineLockService (live provisioning, counterfactuals, ABA & 2-phase gate)
+│   │   ├── jiraGateway.ts            # Live @forge/api REST v3 gateway (direct + group-role RBAC & 6-ticket provisioner)
+│   │   ├── service.ts                # LineLockService (live provisioning, counterfactuals, re-pinning, ABA & 2-phase gate)
 │   │   ├── rovo.ts                   # Strictly read-only Rovo action handlers
 │   │   └── index.ts                  # Forge resolver, workflowValidator, triggers, queue & Rovo exports
 │   └── frontend/
-│       └── index.tsx                 # UI Kit 2 Assurance Cockpit (Matrix, K3 Proof Tree, Simulator, Governance)
+│       └── index.tsx                 # UI Kit 2 Assurance Cockpit (Matrix, K3 Proof Tree, Simulator, Governance, Tamper Lab)
 ├── tests/
 │   ├── verification.test.ts          # Kernel, adversarial CE-01..11b, ABA, SQL CAS & 2-phase workflow tests
 │   ├── phase2-cockpit-rovo.test.ts   # Live 6-issue provisioning, tamper detection, policy switch & Rovo tests
-│   ├── jira-gateway.test.ts          # @forge/api REST v3 contract tests
+│   ├── phase3-production-hardening.test.ts # Group-role RBAC, 0ms receipt promotion, [SN_from..SN_to) splits & re-pinning
+│   ├── jira-gateway.test.ts          # @forge/api REST v3 contract tests (including /user/groups & ADF comment export)
 │   └── manifest-validation.test.ts   # Official @forge/manifest schema & zero-egress validation
 └── scripts/
     ├── run-benchmark.ts              # Reproducible benchmark against B0, B1, and strengthened B2
@@ -77,7 +79,7 @@ npm run verify
 
 `npm run verify` executes:
 1. `tsc -p tsconfig.typecheck.json --noEmit` — Strict TypeScript check across `src/`, `tests/`, and `scripts/`.
-2. `vitest run` — Full adversarial, ABA, SQL CAS, provisioning, Rovo, and `@forge/manifest` test suites.
+2. `vitest run` — Full adversarial, ABA, SQL CAS, provisioning, group-actor RBAC, Rovo, and `@forge/manifest` test suites.
 3. `tsx scripts/run-benchmark.ts` — Ground-truth benchmark across 16 labeled scenarios (37 slice-obligation assertions):
    - `B0 (Timestamp & Done Status)`: `20/37` (`54.1%`), `17` False-Safe
    - `B1 (Untyped Suspect Graph)`: `18/37` (`48.6%`), `10` False-Safe, `9` False-Block
@@ -92,11 +94,10 @@ npm run verify
 ### 1. Deploy & Install
 ```bash
 npx forge login
-npx forge register   # (Skip if deploying to your own registered app ARI)
-npx forge deploy -e development
-npx forge install --product jira --site <your-site>.atlassian.net
+npx forge deploy -e production
+npx forge install -e production --product jira --site <your-site>.atlassian.net
 ```
-*(If upgrading an existing installation after pulling Phase 2 scopes, run `npx forge install --upgrade --product jira --site <your-site>.atlassian.net`.)*
+*(Or install in 1 click using the Developer Console Installation Link provided in the submission notes.)*
 
 > **Browser Note:** If using **Brave Browser**, toggle **Brave Shields OFF** on `<your-site>.atlassian.net` so Brave does not block Forge UI Kit 2's cross-origin `atlassian-dev.net` iframe bridge.
 
@@ -105,10 +106,11 @@ npx forge install --product jira --site <your-site>.atlassian.net
 2. Navigate to **Space settings $\rightarrow$ Workflows $\rightarrow$ Edit workflow** (`Text` tab).
 3. Select the **`Done`** transition $\rightarrow$ **Rules $\rightarrow$ Validate details (`+`)** $\rightarrow$ select **`LineLock Effectivity-Aware Evidence Gate`** $\rightarrow$ **Add** $\rightarrow$ **Update workflow**.
 
-### 3. Interactive Walkthrough on an ECO Issue (`ECO-1`)
-1. Open `ECO-1`, click the **Apps (`⬡`)** icon under the issue title, and open **`LineLock Assurance Cockpit`**.
-2. Click **`Provision Helios EV Pack + 6 Live Jira Tests (Recommended)`** — LineLock creates 6 real `Done` Jira qualification tickets (`ECO-2`..`ECO-7`), links them to `ECO-1`, and pins their SHA-256 content hashes in Forge SQL.
-3. Click **`Propose Cap Rev C (ALL, SN>=5000)`** — inspect why `VAR_400V [SN 5000..+inf)` passes via rule `CFR-400-CAP-SUB` while `VAR_800V [SN 5000..+inf)` fails Strong Kleene $K_3$ (`1.25 * 800V = 1000V <= 630V -> FALSE`), and try moving `ECO-1` to **`Done`** to watch Jira block the transition live!
-4. Open **`Counterfactual & Remediation`**, simulate scoping `CAP-1210@C` to `VAR_400V` from `SN >= 5000` (`0` retests required, `SQL Mutated: FALSE`), and click **`Commit Counterfactual to ECO (CAS)`**.
-5. Open **`Governance & ABA Signoff`** (switch to *Solo-Evaluator Demo Policy* if testing with a single admin account), sign the snapshot & generation, and move `ECO-1` to **`Done`** (`RELEASE_TRANSITIONED_VERIFIED`).
-6. Open **`Ask Rovo`** $\rightarrow$ select **`LineLock Assurance Analyst`**, and ask counterfactual or baseline-audit questions against `ECO-1`!
+### 3. Interactive Walkthrough & Adversarial Judge Tests (`ECO-1`)
+1. **Provision Real Evidence:** Open `ECO-1` $\rightarrow$ **`LineLock Assurance Cockpit`** $\rightarrow$ click **`Provision Helios EV Pack + 6 Live Jira Tests (Recommended)`**. LineLock creates 6 real `Done` Jira qualification tickets, links them to `ECO-1`, and pins their RFC 8785 SHA-256 content hashes in Forge SQL (`6 / 6` Supported).
+2. **Trigger Serial Cutover & Workflow Block:** Click **`Propose Cap Rev C (ALL, SN>=5000)`**. Inspect why `VAR_400V [SN 5000..+inf)` passes via rule `CFR-400-CAP-SUB` while `VAR_800V [SN 5000..+inf)` fails Strong Kleene $K_3$ (`630V < 1.25 * 800V = 1000V -> FALSE`), and try moving `ECO-1` to **`Done`** to watch Jira block the transition live.
+3. **Parametric Counterfactuals (Open-Ended or Lot-Bounded `[SN_from..SN_to)`):** Open **`Counterfactual & Remediation`**. Try scoping `CAP-1210@C` to `VAR_400V` across an arbitrary lot window (e.g., `Serial Start = 3500`, `Serial End = 7000` to watch 3-way interval splitting `[1000..3500)`, `[3500..7000)`, `[7000..+inf)` with `SQL Mutated: FALSE` and live `B0`/`B1`/`B2` discrepancy metrics!), or test `CAP-1210@D_DRAFT` (`BLOCKED_STRUCTURAL`) and `DRV-ISO@B` (`INVALIDATED_UNCOVERED_CHANGE`), then commit the `VAR_400V` `SN >= 5000` cutover via CAS.
+4. **Live Jira Tamper & Re-Pin Lab (Optional Adversarial Test):** Open **`Jira Evidence & Diagnostics`**, edit the description of any linked qualification ticket (e.g., `ECO-8`) directly in Jira, and click **`Refresh Live State`** on `ECO-1` to watch SHA-256 drift (`INVALIDATED_EVIDENCE_DRIFT`) immediately lock the release gate; then click **`Re-Pin Live Done Jira Hashes`** to see `approvalGeneration` increment and force fresh human review.
+5. **Generation-Bound RBAC Signoff, Audit Export & Verified `Done` Release:** Open **`Governance & ABA Signoff`**, switch to *Solo-Evaluator Demo Policy* (automatically resolves both direct and group-assigned Jira `Administrators` via `/rest/api/3/user/groups`), sign the snapshot, optionally click **`Post Audit Record Comment to ECO`**, and transition `ECO-1` to **`Done`** (`RELEASE_TRANSITIONED_VERIFIED`).
+6. **Ask Rovo Analyst:** Click **`Ask Rovo`** $\rightarrow$ **`LineLock Assurance Analyst`**, and run **`Compare LineLock's verification of ECO-1 against traditional PLM/ALM baselines`**.
+

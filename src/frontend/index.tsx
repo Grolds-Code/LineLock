@@ -72,6 +72,27 @@ function gateAppearance(
   }
 }
 
+function gateShortLabel(state: EcoGateState): string {
+  switch (state) {
+    case "READY_FOR_RELEASE_TRANSITION":
+      return "RELEASE READY";
+    case "RELEASE_TRANSITIONED_VERIFIED":
+      return "RELEASE VERIFIED";
+    case "AWAITING_ATTESTATION":
+      return "AWAITING SIGNOFF";
+    case "EVIDENCE_INCOMPLETE":
+      return "EVIDENCE MISSING";
+    case "BLOCKED_INVALIDATED":
+      return "BLOCKED: INVALIDATED";
+    case "BLOCKED_INDETERMINATE":
+      return "BLOCKED: UNKNOWN";
+    case "BLOCKED_STRUCTURAL":
+      return "BLOCKED: STRUCTURAL";
+    case "UNVALIDATED_RELEASE_DRIFT":
+      return "RELEASE DRIFT ALERT";
+  }
+}
+
 function sliceStatusAppearance(
   status: SliceObligationStatus
 ): "success" | "inprogress" | "removed" | "moved" | "default" {
@@ -92,6 +113,35 @@ function sliceStatusAppearance(
     case "INDETERMINATE_UNEXAMINED_OPERATING_CONDITION":
     case "UNCOVERED_OR_UNEXECUTED":
       return "moved";
+  }
+}
+
+function sliceShortLabel(status: SliceObligationStatus): string {
+  switch (status) {
+    case "SUPPORTED_AS_TESTED":
+      return "AS TESTED";
+    case "SUPPORTED_BY_APPROVED_RULE":
+      return "APPROVED RULE";
+    case "INVALIDATED_EVIDENCE_DRIFT":
+      return "EVIDENCE DRIFT";
+    case "INVALIDATED_PREDICATE_FALSE":
+      return "PREDICATE FALSE";
+    case "INVALIDATED_ENVELOPE_EXCEEDED":
+      return "ENVELOPE EXCEEDED";
+    case "INVALIDATED_UNCOVERED_CHANGE":
+      return "UNCOVERED CHANGE";
+    case "INVALIDATED_RETEST_REQUIRED":
+      return "RETEST REQUIRED";
+    case "INDETERMINATE_MISSING_DATA":
+      return "MISSING DATA";
+    case "INDETERMINATE_INCOMPLETE_EVIDENCE_FOOTPRINT":
+      return "PARTIAL FOOTPRINT";
+    case "INDETERMINATE_UNEXAMINED_DEPENDENCY":
+      return "UNEXAMINED SLOT";
+    case "INDETERMINATE_UNEXAMINED_OPERATING_CONDITION":
+      return "UNEXAMINED ENV";
+    case "UNCOVERED_OR_UNEXECUTED":
+      return "UNEXECUTED";
   }
 }
 
@@ -182,14 +232,14 @@ const LineLockAssuranceCockpit: React.FC = () => {
   const [selectedSliceOblKey, setSelectedSliceOblKey] = useState<string | null>(null);
 
   // Counterfactual Simulator state
-  const [cfKind, setCfKind] = useState<
-    "CAP_REV_C_CUTOVER" | "SEAL_REV_B_CUTOVER" | "AMBIENT_ENVELOPE_SHIFT"
-  >("CAP_REV_C_CUTOVER");
+  const [cfKind, setCfKind] = useState<CounterfactualRequest["kind"]>("CAP_REV_C_CUTOVER");
   const [cfVariantScope, setCfVariantScope] = useState<"ALL" | "VAR_400V" | "VAR_800V">("VAR_400V");
   const [cfSerialFrom, setCfSerialFrom] = useState<string>("5000");
+  const [cfSerialTo, setCfSerialTo] = useState<string>("");
   const [cfMinAmbient, setCfMinAmbient] = useState<string>("-20");
   const [cfMaxAmbient, setCfMaxAmbient] = useState<string>("58");
   const [cfResult, setCfResult] = useState<CounterfactualSimulationResult | null>(null);
+  const [showAuditMarkdown, setShowAuditMarkdown] = useState<boolean>(false);
 
   // Governance & Attestation form state
   const [selectedRole, setSelectedRole] = useState<string>("Lead Engineers");
@@ -261,26 +311,35 @@ const LineLockAssuranceCockpit: React.FC = () => {
       if (next.evaluation?.attestationSummary.missingRoles[0]) {
         setSelectedRole(next.evaluation.attestationSummary.missingRoles[0]);
       }
-      setStatusNotice(`Committed preset "${label}" (CAS rev ${next.workspace?.revisionSeq}, approval generation ${next.workspace?.eco.approvalGeneration}).`);
+      setStatusNotice(
+        `Committed preset "${label}" (CAS rev ${next.workspace?.revisionSeq}, approval generation ${next.workspace?.eco.approvalGeneration}).`
+      );
     });
 
   const handleRunCounterfactual = (): Promise<void> =>
     runAction("sim-cf", async () => {
       const parsedSerial = Math.max(1000, Number.parseInt(cfSerialFrom, 10) || 5000);
+      const rawEnd = cfSerialTo.trim();
+      const parsedEnd = rawEnd.length > 0 ? Number.parseInt(rawEnd, 10) : Number.NaN;
+      const serialTo =
+        Number.isFinite(parsedEnd) && parsedEnd > parsedSerial ? parsedEnd : null;
       const targetVariants: "ALL" | readonly string[] =
         cfVariantScope === "ALL" ? "ALL" : [cfVariantScope];
 
       const request: CounterfactualRequest =
-        cfKind === "CAP_REV_C_CUTOVER"
-          ? { kind: "CAP_REV_C_CUTOVER", targetVariants, serialFrom: parsedSerial }
-          : cfKind === "SEAL_REV_B_CUTOVER"
-            ? { kind: "SEAL_REV_B_CUTOVER", targetVariants, serialFrom: parsedSerial }
-            : {
-                kind: "AMBIENT_ENVELOPE_SHIFT",
-                variantId: cfVariantScope === "VAR_800V" ? "VAR_800V" : "VAR_400V",
-                minAmbientC: Number.parseInt(cfMinAmbient, 10) || -20,
-                maxAmbientC: Number.parseInt(cfMaxAmbient, 10) || 58
-              };
+        cfKind === "AMBIENT_ENVELOPE_SHIFT"
+          ? {
+              kind: "AMBIENT_ENVELOPE_SHIFT",
+              variantId: cfVariantScope === "VAR_800V" ? "VAR_800V" : "VAR_400V",
+              minAmbientC: Number.parseInt(cfMinAmbient, 10) || -20,
+              maxAmbientC: Number.parseInt(cfMaxAmbient, 10) || 58
+            }
+          : {
+              kind: cfKind,
+              targetVariants,
+              serialFrom: parsedSerial,
+              serialTo
+            };
 
       const res = unwrapInvoke(
         await invoke<CounterfactualSimulationResult>("simulateCounterfactual", {
@@ -349,6 +408,37 @@ const LineLockAssuranceCockpit: React.FC = () => {
       );
     });
 
+  const handleRepinLiveEvidence = (): Promise<void> =>
+    runAction("repin-ev", async () => {
+      if (!view?.workspace) return;
+      const next = unwrapInvoke(
+        await invoke<EcoWorkspaceView>("repinLiveEvidenceHashes", {
+          expectedRevisionSeq: view.workspace.revisionSeq
+        })
+      );
+      setView(next);
+      setCfResult(null);
+      if (next.evaluation?.attestationSummary.missingRoles[0]) {
+        setSelectedRole(next.evaluation.attestationSummary.missingRoles[0]);
+      }
+      setStatusNotice(
+        `Re-pinned live Done Jira qualification SHA-256 hashes via CAS (rev ${next.workspace?.revisionSeq}, approval generation ${next.workspace?.eco.approvalGeneration}; prior attestations invalidated for re-review).`
+      );
+    });
+
+  const handlePostAuditComment = (): Promise<void> =>
+    runAction("post-audit", async () => {
+      const res = unwrapInvoke(
+        await invoke<{ readonly commentId: string; readonly view: EcoWorkspaceView }>(
+          "postAuditRecordComment"
+        )
+      );
+      setView(res.view);
+      setStatusNotice(
+        `Posted deterministic Release Assurance & Effectivity Disposition Record to Jira comment #${res.commentId}.`
+      );
+    });
+
   const handleProbe = (): Promise<void> =>
     runAction("probe", async () => {
       const res = unwrapInvoke(
@@ -397,18 +487,22 @@ const LineLockAssuranceCockpit: React.FC = () => {
       {/* Top Executive Gate Header */}
       <Box xcss={cardBoxStyle}>
         <Stack space="space.150">
-          <Inline spread="space-between" alignBlock="center" space="space.150">
-            <Inline space="space.100" alignBlock="center">
+          <Inline spread="space-between" alignBlock="center" space="space.150" shouldWrap>
+            <Inline space="space.100" alignBlock="center" shouldWrap>
               <Heading size="small">LineLock Assurance Cockpit</Heading>
               {evaluation ? (
                 <Lozenge appearance={gateAppearance(evaluation.gateState)} isBold maxWidth={340}>
-                  {evaluation.gateState}
+                  {gateShortLabel(evaluation.gateState)}
                 </Lozenge>
               ) : (
                 <Lozenge appearance="default">UNINITIALIZED</Lozenge>
               )}
               {evaluation ? (
-                <Lozenge appearance={evaluation.transitionAllowed ? "success" : "removed"} isBold maxWidth={340}>
+                <Lozenge
+                  appearance={evaluation.transitionAllowed ? "success" : "removed"}
+                  isBold
+                  maxWidth={340}
+                >
                   {evaluation.transitionAllowed ? "RELEASE ALLOWED" : "WORKFLOW LOCKED"}
                 </Lozenge>
               ) : null}
@@ -437,6 +531,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
             <Tag text="Runs on Atlassian" color="blue" />
             {workspace && evaluation ? (
               <>
+                <Code>{`Gate: ${evaluation.gateState}`}</Code>
                 <Code>{`SHA-256: ${evaluation.snapshotSha256.slice(0, 12)}...`}</Code>
                 <Code>{`Approval Gen: ${workspace.eco.approvalGeneration}`}</Code>
                 <Code>{`SQL CAS Rev: ${workspace.revisionSeq}`}</Code>
@@ -660,9 +755,16 @@ const LineLockAssuranceCockpit: React.FC = () => {
                       {
                         key: "verdict",
                         content: (
-                          <Lozenge appearance={sliceStatusAppearance(so.status)} isBold maxWidth={340}>
-                            {so.status}
-                          </Lozenge>
+                          <Stack space="space.050">
+                            <Lozenge
+                              appearance={sliceStatusAppearance(so.status)}
+                              isBold
+                              maxWidth={340}
+                            >
+                              {sliceShortLabel(so.status)}
+                            </Lozenge>
+                            <Code>{so.status}</Code>
+                          </Stack>
                         )
                       },
                       {
@@ -706,13 +808,20 @@ const LineLockAssuranceCockpit: React.FC = () => {
               {inspectedSliceObl ? (
                 <Box xcss={cardBoxStyle}>
                   <Stack space="space.150">
-                    <Inline spread="space-between" alignBlock="center">
+                    <Inline spread="space-between" alignBlock="center" shouldWrap>
                       <Heading size="xsmall">
                         {`Proof Trace: ${inspectedSliceObl.variantId} ${formatSerialRange(inspectedSliceObl.interval)} — ${inspectedSliceObl.obligationCode}`}
                       </Heading>
-                      <Lozenge appearance={sliceStatusAppearance(inspectedSliceObl.status)} isBold maxWidth={340}>
-                        {inspectedSliceObl.status}
-                      </Lozenge>
+                      <Inline space="space.100" alignBlock="center">
+                        <Lozenge
+                          appearance={sliceStatusAppearance(inspectedSliceObl.status)}
+                          isBold
+                          maxWidth={340}
+                        >
+                          {sliceShortLabel(inspectedSliceObl.status)}
+                        </Lozenge>
+                        <Code>{inspectedSliceObl.status}</Code>
+                      </Inline>
                     </Inline>
                     <Text>{inspectedSliceObl.explanation}</Text>
 
@@ -765,44 +874,60 @@ const LineLockAssuranceCockpit: React.FC = () => {
               <Box xcss={cardBoxStyle}>
                 <Stack space="space.150">
                   <Heading size="small">
-                    Read-Only Counterfactual What-If Simulator (Zero Storage Mutation)
+                    Read-Only Parametric Counterfactual Simulator (Zero Storage Mutation)
                   </Heading>
                   <Text>
-                    Simulate effectivity-scoped component cutovers or environmental envelope changes
-                    against live Jira evidence before committing to the ECO.
+                    Simulate arbitrary serial-interval component substitutions (open-ended or
+                    lot-bounded [SN_from..SN_to)), unapproved DRAFT sample gates, uncovered
+                    governed-slot changes, or operating-envelope shifts against live Jira evidence
+                    before committing to Forge SQL.
                   </Text>
 
                   <Inline space="space.150" shouldWrap alignBlock="end">
                     <Stack space="space.050">
-                      <Text>Counterfactual Operation</Text>
+                      <Text>Counterfactual Engineering Operation</Text>
                       <Select
                         options={[
                           {
-                            label: "Substitute CAP-1210@C (630V X7R)",
+                            label: "HV Cap -> CAP-1210@C (630V X7R)",
                             value: "CAP_REV_C_CUTOVER"
                           },
                           {
-                            label: "Substitute SEAL-EPDM@B (Enclosure)",
+                            label: "HV Cap -> CAP-1210@D_DRAFT (Unapproved Sample)",
+                            value: "CAP_REV_D_DRAFT_CUTOVER"
+                          },
+                          {
+                            label: "Gate Driver -> DRV-ISO@B (19ns Uncovered Slot)",
+                            value: "GATE_DRIVER_REV_B_CUTOVER"
+                          },
+                          {
+                            label: "Enclosure Gasket -> SEAL-EPDM@B (Excluded HV/EMC)",
                             value: "SEAL_REV_B_CUTOVER"
                           },
                           {
-                            label: "Shift Ambient Temperature Envelope",
+                            label: "Shift Operating Ambient Temperature Envelope",
                             value: "AMBIENT_ENVELOPE_SHIFT"
                           }
                         ]}
                         value={{
                           label:
                             cfKind === "CAP_REV_C_CUTOVER"
-                              ? "Substitute CAP-1210@C (630V X7R)"
-                              : cfKind === "SEAL_REV_B_CUTOVER"
-                                ? "Substitute SEAL-EPDM@B (Enclosure)"
-                                : "Shift Ambient Temperature Envelope",
+                              ? "HV Cap -> CAP-1210@C (630V X7R)"
+                              : cfKind === "CAP_REV_D_DRAFT_CUTOVER"
+                                ? "HV Cap -> CAP-1210@D_DRAFT (Unapproved Sample)"
+                                : cfKind === "GATE_DRIVER_REV_B_CUTOVER"
+                                  ? "Gate Driver -> DRV-ISO@B (19ns Uncovered Slot)"
+                                  : cfKind === "SEAL_REV_B_CUTOVER"
+                                    ? "Enclosure Gasket -> SEAL-EPDM@B (Excluded HV/EMC)"
+                                    : "Shift Operating Ambient Temperature Envelope",
                           value: cfKind
                         }}
                         onChange={(opt: { value?: string } | null) => {
                           const v = opt?.value;
                           if (
                             v === "CAP_REV_C_CUTOVER" ||
+                            v === "CAP_REV_D_DRAFT_CUTOVER" ||
+                            v === "GATE_DRIVER_REV_B_CUTOVER" ||
                             v === "SEAL_REV_B_CUTOVER" ||
                             v === "AMBIENT_ENVELOPE_SHIFT"
                           ) {
@@ -839,13 +964,23 @@ const LineLockAssuranceCockpit: React.FC = () => {
                     </Stack>
 
                     {cfKind !== "AMBIENT_ENVELOPE_SHIFT" ? (
-                      <Stack space="space.050">
-                        <Text>Serial Cutover (SN &gt;=)</Text>
-                        <Textfield
-                          value={cfSerialFrom}
-                          onChange={(e) => setCfSerialFrom(extractEventString(e))}
-                        />
-                      </Stack>
+                      <>
+                        <Stack space="space.050">
+                          <Text>Serial Start (SN &gt;=)</Text>
+                          <Textfield
+                            value={cfSerialFrom}
+                            onChange={(e) => setCfSerialFrom(extractEventString(e))}
+                          />
+                        </Stack>
+                        <Stack space="space.050">
+                          <Text>Serial End (SN &lt;, blank = +inf)</Text>
+                          <Textfield
+                            placeholder="+inf (open-ended)"
+                            value={cfSerialTo}
+                            onChange={(e) => setCfSerialTo(extractEventString(e))}
+                          />
+                        </Stack>
+                      </>
                     ) : (
                       <>
                         <Stack space="space.050">
@@ -877,10 +1012,14 @@ const LineLockAssuranceCockpit: React.FC = () => {
                   {cfResult ? (
                     <Box xcss={traceNodeStyle}>
                       <Stack space="space.150">
-                        <Inline spread="space-between" alignBlock="center">
+                        <Inline spread="space-between" alignBlock="center" shouldWrap>
                           <Inline space="space.100" alignBlock="center">
                             <Heading size="xsmall">Counterfactual Delta Result</Heading>
                             <Tag text="SQL Mutated: FALSE" color="green" />
+                            <Tag
+                              text={`Effective Slices: ${cfResult.simulatedEvaluation.slices.length}`}
+                              color="blue"
+                            />
                           </Inline>
                           <LoadingButton
                             appearance="primary"
@@ -901,6 +1040,40 @@ const LineLockAssuranceCockpit: React.FC = () => {
                         {cfResult.simulatedEvaluation.blockingReasons.map((r, i) => (
                           <Text key={`sim-blk-${i}`}>{`• ${r}`}</Text>
                         ))}
+
+                        {cfResult.baselineComparison ? (
+                          <Stack space="space.075">
+                            <Heading size="xsmall">
+                              Simulated Industry Baseline Comparison (Why Traditional PLM/ALM Fails)
+                            </Heading>
+                            <Inline space="space.100" shouldWrap>
+                              <Code>
+                                {`B0 (Timestamp Freshness): ${
+                                  cfResult.baselineComparison.b0.filter(
+                                    (x) => x.verdict === "SUPPORTED"
+                                  ).length
+                                }/${cfResult.baselineComparison.b0.length} supported`}
+                              </Code>
+                              <Code>
+                                {`B1 (Untyped ALM Suspect Graph): ${
+                                  cfResult.baselineComparison.b1.filter(
+                                    (x) => x.verdict === "SUPPORTED"
+                                  ).length
+                                }/${cfResult.baselineComparison.b1.length} supported`}
+                              </Code>
+                              <Code>
+                                {`B2 (PLM Version + Std Envelope): ${
+                                  cfResult.baselineComparison.b2.filter(
+                                    (x) => x.verdict === "SUPPORTED"
+                                  ).length
+                                }/${cfResult.baselineComparison.b2.length} supported`}
+                              </Code>
+                              <Code>
+                                {`LineLock (Strong Kleene K3): ${cfResult.delta.simulatedSupportedCount}/${cfResult.simulatedEvaluation.sliceObligations.length} supported`}
+                              </Code>
+                            </Inline>
+                          </Stack>
+                        ) : null}
                       </Stack>
                     </Box>
                   ) : null}
@@ -1090,6 +1263,41 @@ const LineLockAssuranceCockpit: React.FC = () => {
                   ) : null}
                 </Stack>
               </Box>
+
+              {/* Deterministic Release Assurance & Effectivity Disposition Record Export */}
+              {view?.releaseAssuranceMarkdown ? (
+                <Box xcss={cardBoxStyle}>
+                  <Stack space="space.150">
+                    <Inline spread="space-between" alignBlock="center" shouldWrap>
+                      <Heading size="xsmall">
+                        Deterministic Release Assurance &amp; Effectivity Disposition Record
+                      </Heading>
+                      <Inline space="space.100" shouldWrap>
+                        <LoadingButton
+                          appearance="primary"
+                          isLoading={busyAction === "post-audit"}
+                          onClick={handlePostAuditComment}
+                        >
+                          Post Audit Record Comment to ECO
+                        </LoadingButton>
+                        <Button onClick={() => setShowAuditMarkdown((prev) => !prev)}>
+                          {showAuditMarkdown
+                            ? "Hide Disposition Markdown"
+                            : "Preview Disposition Markdown"}
+                        </Button>
+                      </Inline>
+                    </Inline>
+                    <Text>
+                      Cryptographically bound DVP&amp;R disposition summary citing RFC 8785 snapshot
+                      SHA-256, monotonic approvalGeneration, slice × obligation verdicts, and
+                      pinned Jira evidence hashes.
+                    </Text>
+                    {showAuditMarkdown ? (
+                      <CodeBlock language="markdown" text={view.releaseAssuranceMarkdown} />
+                    ) : null}
+                  </Stack>
+                </Box>
+              ) : null}
             </Stack>
           </TabPanel>
 
@@ -1098,14 +1306,26 @@ const LineLockAssuranceCockpit: React.FC = () => {
             <Stack space="space.200">
               <SectionMessage
                 appearance="information"
-                title="Live Jira Evidence Content-Pinning Verification"
+                title="Live Jira Evidence Content-Pinning & Tamper Lab"
               >
-                <Text>
-                  LineLock never trusts issue timestamps or Done status alone. Edit the summary or
-                  description of any linked qualification work item below in Jira, then click
-                  &quot;Refresh Live State&quot; above to watch SHA-256 content drift invalidate
-                  release readiness immediately.
-                </Text>
+                <Stack space="space.100">
+                  <Text>
+                    LineLock never trusts issue timestamps or Done status alone. Edit the summary or
+                    description of any linked qualification work item below in Jira, then click
+                    &quot;Refresh Live State&quot; above to watch SHA-256 content drift invalidate
+                    release readiness immediately. After legitimate test updates are reviewed in
+                    Done status, re-pinning increments approvalGeneration and forces fresh signoff.
+                  </Text>
+                  <Inline space="space.100" shouldWrap>
+                    <LoadingButton
+                      appearance="primary"
+                      isLoading={busyAction === "repin-ev"}
+                      onClick={handleRepinLiveEvidence}
+                    >
+                      Re-Pin Live Done Jira Hashes (CAS + Gen Increment)
+                    </LoadingButton>
+                  </Inline>
+                </Stack>
               </SectionMessage>
 
               <DynamicTable

@@ -59,7 +59,8 @@ vi.mock("@forge/api", () => {
         status: 200,
         json: async () => ({
           "Lead Engineers": "https://helios-industrial.atlassian.net/rest/api/3/project/ECO/role/10002",
-          "Quality Approvers": "https://helios-industrial.atlassian.net/rest/api/3/project/ECO/role/10003"
+          "Quality Approvers": "https://helios-industrial.atlassian.net/rest/api/3/project/ECO/role/10003",
+          Administrators: "https://helios-industrial.atlassian.net/rest/api/3/project/ECO/role/10004"
         })
       };
     }
@@ -84,7 +85,51 @@ vi.mock("@forge/api", () => {
       };
     }
 
-    return { ok: false, status: 404, json: async () => ({}) };
+    if (pathStr.endsWith("/rest/api/3/project/ECO/role/10004")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          actors: [
+            {
+              type: "atlassian-group-role-actor",
+              name: "jira-administrators",
+              actorGroup: {
+                groupId: "grp-admins-001",
+                name: "jira-administrators",
+                displayName: "jira-administrators"
+              }
+            }
+          ]
+        })
+      };
+    }
+
+    if (pathStr.includes("/rest/api/3/user/groups?accountId=acct-group-admin-judge")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [{ groupId: "grp-admins-001", name: "jira-administrators" }]
+      };
+    }
+
+    if (pathStr.includes("/rest/api/3/user/groups?accountId=acct-regular-user")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [{ groupId: "grp-users-001", name: "jira-software-users" }]
+      };
+    }
+
+    if (pathStr.endsWith("/rest/api/3/issue/ECO-204/comment")) {
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ id: "77881" })
+      };
+    }
+
+    return { ok: false, status: 404, text: async () => "not found", json: async () => ({}) };
   });
 
   return {
@@ -101,7 +146,7 @@ vi.mock("@forge/api", () => {
 import { ForgeJiraPlatformGateway } from "../src/forge/jiraGateway";
 
 describe("ForgeJiraPlatformGateway — @forge/api REST Contract", () => {
-  it("executes connectivity probe, parses ADF issue descriptions, and resolves project role actors", async () => {
+  it("executes connectivity probe, parses ADF issue descriptions, resolves direct + group role actors, and posts ADF audit comments", async () => {
     const gateway = new ForgeJiraPlatformGateway();
 
     const probe = await gateway.probeConnectivity({
@@ -112,20 +157,27 @@ describe("ForgeJiraPlatformGateway — @forge/api REST Contract", () => {
     expect(probe.callerAccountId).toBe("5b10ac8d82e05b22cc7d4ef5");
     expect(probe.jiraServerBaseUrl).toBe("https://helios-industrial.atlassian.net");
     expect(probe.issueReachable).toBe(true);
-    expect(probe.resolvedRoleCount).toBe(2);
+    expect(probe.resolvedRoleCount).toBe(3);
 
     const issue = await gateway.fetchLiveIssue("20204");
     expect(issue.issueKey).toBe("ECO-204");
     expect(issue.description).toBe("Effectivity-scoped HV capacitor ECO.");
     expect(issue.statusCategoryKey).toBe("indeterminate");
 
-    const roles = await gateway.fetchProjectRoleMembers("ECO", [
-      "Lead Engineers",
-      "Quality Approvers",
-      "Nonexistent Role"
-    ]);
+    const roles = await gateway.fetchProjectRoleMembers(
+      "ECO",
+      ["Lead Engineers", "Quality Approvers", "Administrators", "Nonexistent Role"],
+      ["acct-group-admin-judge", "acct-regular-user"]
+    );
     expect(roles["Lead Engineers"]).toEqual(["acct-lead-eng-1"]);
     expect(roles["Quality Approvers"]).toEqual(["acct-qa-approver-1"]);
+    expect(roles["Administrators"]).toEqual(["acct-group-admin-judge"]);
     expect(roles["Nonexistent Role"]).toEqual([]);
+
+    const commentRes = await gateway.postIssueComment({
+      issueIdOrKey: "ECO-204",
+      markdownText: "# Audit Record\nVerified."
+    });
+    expect(commentRes.commentId).toBe("77881");
   });
 });
