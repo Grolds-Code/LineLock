@@ -194,6 +194,50 @@ function buildPhase4Harness() {
 }
 
 describe("Phase 4: Multi-Industry Templates, Custom Authoring Studio, Live Jira Binding & Space-Wide Fleet Portfolio", () => {
+  it("paginates at 25 caller-visible ECOs without leaking restricted rows into counts", async () => {
+    const { service, jira } = buildPhase4Harness();
+    for (let n = 0; n < 30; n++) {
+      const issueId = String(990000 + n);
+      const issueKey = `ECO-${500 + n}`;
+      jira.issuesById.set(issueId, {
+        issueId, issueKey, projectKey: "ECO",
+        issueTypeId: "10200", issueTypeName: "Engineering Change Order",
+        summary: `Safety-controlled change ${n}`,
+        description: "Fleet page fixture", statusCategoryKey: "new",
+        resolutionName: null, updatedAtEpochMs: HELIOS_BASE_EPOCH_MS + n,
+        structuredFields: {}
+      });
+      await service.seedReferenceWorkspace({
+        ecoIssueId: issueId, ecoIssueKey: issueKey,
+        callerAccountId: "acct-author", templateId: "AUTOMOTIVE_EV_HELIOS"
+      });
+    }
+    const first = await service.getProjectFleetOverview({ projectKey: "ECO" });
+    expect(first.totalEcos).toBe(25);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toBe("25");
+    expect(first.isPartialPage).toBe(true);
+
+    const second = await service.getProjectFleetOverview({
+      projectKey: "ECO", cursor: first.nextCursor!
+    });
+    expect(second.totalEcos).toBe(5);
+    expect(second.hasMore).toBe(false);
+    const allKeys = [...first.ecos, ...second.ecos].map((eco) => eco.ecoIssueKey);
+    expect(new Set(allKeys).size).toBe(30);
+
+    const visibleOnly = await service.getProjectFleetOverview({
+      projectKey: "ECO",
+      canViewWorkspace: async (ws) => Number(ws.ecoIssueId) % 2 === 0
+    });
+    expect(visibleOnly.totalEcos).toBe(15);
+    expect(visibleOnly.hasMore).toBe(false);
+    expect(visibleOnly.ecos.every((row) => Number(row.ecoIssueId) % 2 === 0)).toBe(true);
+    await expect(service.getProjectFleetOverview({
+      projectKey: "ECO", cursor: "-1"
+    })).rejects.toThrow(/Invalid Fleet page cursor/);
+  });
+
   it("ignores stale global evidence registry grants for an uninitialized ECO and allows ordinary Tasks", async () => {
     const { service, store, jira, provisioning } = buildPhase4Harness();
     await provisioning.runMigrations("install");
