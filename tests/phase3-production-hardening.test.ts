@@ -138,6 +138,7 @@ class GroupAwareJiraGatewayStub implements JiraPlatformGateway {
         issueId: id,
         issueKey: key,
         projectKey: params.projectKey,
+        issueTypeName: "Task",
         summary: spec.summary,
         description: spec.description,
         statusCategoryKey: "new",
