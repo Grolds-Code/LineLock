@@ -45,6 +45,8 @@ import {
   type ConnectivityProbeResult,
   type CounterfactualRequest,
   type CounterfactualSimulationResult,
+  type EvidenceProvisioningLedger,
+  type EvidenceProvisioningSlot,
   type CustomComponentSubstitutionRequest,
   type EcoWorkspaceView,
   type FleetEcoSummaryRow,
@@ -53,6 +55,7 @@ import {
   type LiveEvidenceIntegrityRow,
   type ProjectFleetOverview,
   type ProvisioningStatusReport,
+  type ProvisionedVerificationIssue,
   type ScenarioPresetId,
   type StoredEcoWorkspace,
   type VerificationIssueSeedSpec,
@@ -122,6 +125,7 @@ export class LineLockService {
     readonly projectKey: string;
     readonly ecoIssueId: string;
     readonly callerAccountId?: string;
+    readonly readOnly?: boolean;
   }): Promise<EcoWorkspaceView> {
     const provisioning = await this.provisioning.inspectStatus();
     if (provisioning.state !== "READY") {
@@ -145,11 +149,13 @@ export class LineLockService {
       };
     }
 
-    workspace = await this.maybeFinalizePendingTransitionIntent(
-      params.projectKey,
-      params.ecoIssueId,
-      workspace
-    );
+    if (!params.readOnly) {
+      workspace = await this.maybeFinalizePendingTransitionIntent(
+        params.projectKey,
+        params.ecoIssueId,
+        workspace
+      );
+    }
 
     const { evaluation, evidenceIntegrity, baselineSummary } =
       await this.evaluateWorkspaceWithIntegrity(
@@ -165,6 +171,14 @@ export class LineLockService {
       evaluation,
       finalizedReceipt: workspace.finalizedReleaseReceipt
     });
+    const liveEcoForReconciliation = params.readOnly && workspace.pendingTransitionIntent
+      ? await this.jira.fetchLiveIssue(params.ecoIssueId)
+      : null;
+    const reconciliationStatus =
+      liveEcoForReconciliation?.statusCategoryKey.toLowerCase() === "done" &&
+      !workspace.finalizedReleaseReceipt
+        ? "PENDING_RELEASE_RECONCILIATION" as const
+        : undefined;
     return {
       callerAccountId: params.callerAccountId,
       provisioning,
@@ -172,7 +186,8 @@ export class LineLockService {
       evaluation,
       evidenceIntegrity,
       releaseAssuranceMarkdown,
-      baselineSummary
+      baselineSummary,
+      reconciliationStatus
     };
   }
 
@@ -190,7 +205,7 @@ export class LineLockService {
       return existing;
     }
 
-    const liveEco = await this.jira.fetchLiveIssue(params.ecoIssueId);
+    const liveEco = await this.jira.fetchLiveIssueByKeyOrId(params.ecoIssueId);
     const defaultEco = createHeliosDefaultEco();
     const catalog =
       params.catalog ??
@@ -200,6 +215,8 @@ export class LineLockService {
       ...defaultEco,
       ecoJiraIssueId: params.ecoIssueId,
       ecoJiraKey: params.ecoIssueKey || liveEco.issueKey,
+      projectKey: liveEco.projectKey,
+      projectId: liveEco.projectId,
       ecoCreatedAtEpochMs: this.now(),
       authorAccountId: params.callerAccountId,
       lastEditorAccountId: params.callerAccountId,
@@ -235,7 +252,10 @@ export class LineLockService {
   }): Promise<EcoWorkspaceView> {
     await this.ensureProvisionedOrThrow();
 
-    const liveEco = await this.jira.fetchLiveIssue(params.ecoIssueId);
+    const liveEco = await this.jira.fetchLiveIssueByKeyOrId(params.ecoIssueId);
+    if (liveEco.projectKey !== params.projectKey) {
+      throw new Error("Cannot provision ECO evidence in a different Jira project.");
+    }
     const resolvedEcoKey = params.ecoIssueKey || liveEco.issueKey;
 
     const { referenceIssues, catalog: templateCatalog } = instantiateIndustryTemplate(
@@ -253,16 +273,84 @@ export class LineLockService {
       };
     });
 
-    const provisionedList = await this.jira.provisionVerificationIssues({
-      projectKey: params.projectKey,
-      ecoIssueKey: resolvedEcoKey,
-      specs,
-      onCreatedBeforeTransition: async (createdIds) => {
-        if (this.store.registerEvidenceIssueIds) {
-          await this.store.registerEvidenceIssueIds(createdIds);
-        }
+    // An existing provisioned workspace must never be destroyed by a double-click.
+    const existingWorkspace = await this.store.getEcoWorkspace(params.ecoIssueId);
+    const existingLedger = this.store.getProvisioningLedger
+      ? await this.store.getProvisioningLedger(params.ecoIssueId)
+      : null;
+    const hasPristineOfflineReference = Boolean(
+      existingWorkspace &&
+      existingWorkspace.catalog.familyId === templateCatalog.familyId &&
+      existingWorkspace.eco.approvalGeneration === 1 &&
+      existingWorkspace.proposedOperations.length === 0 &&
+      existingWorkspace.attestations.length === 0 &&
+      !existingWorkspace.pendingTransitionIntent &&
+      !existingWorkspace.finalizedReleaseReceipt &&
+      existingWorkspace.catalog.evidenceRecords.length === templateCatalog.evidenceRecords.length &&
+      existingWorkspace.catalog.evidenceRecords.every((ev) => {
+        const reference = templateCatalog.evidenceRecords.find(
+          (candidate) => candidate.evidenceId === ev.evidenceId
+        );
+        return Boolean(reference && ev.jiraIssueId === reference.jiraIssueId);
+      })
+    );
+    if (existingWorkspace) {
+      if (existingWorkspace.catalog.familyId !== templateCatalog.familyId) {
+        throw new Error("This ECO already belongs to another industry template. Provisioning cannot overwrite it.");
       }
-    });
+      if (existingLedger?.status === "COMPLETE" ||
+          (!existingLedger && !hasPristineOfflineReference)) {
+        return this.getWorkspaceView({
+          projectKey: params.projectKey,
+          ecoIssueId: params.ecoIssueId,
+          callerAccountId: params.callerAccountId
+        });
+      }
+      if (existingLedger && !hasPristineOfflineReference &&
+          !(Object.keys(existingLedger.slots).length === specs.length &&
+            Object.values(existingLedger.slots).every((slot) => slot.stage === "LINKED"))) {
+        throw new Error(
+          "Cannot resume evidence provisioning after this ECO's proposal or approvals changed. Administrator review required."
+        );
+      }
+    }
+    if (existingWorkspace && existingLedger &&
+        Object.keys(existingLedger.slots).length === specs.length &&
+        Object.values(existingLedger.slots).every((slot) => slot.stage === "LINKED")) {
+      // A crash may occur after committing the workspace but before closing the
+      // ledger. Mark the operation complete without rewriting the ECO or approvals.
+      await this.store.casProvisioningLedger!(
+        existingLedger.revisionSeq,
+        { ...existingLedger, status: "COMPLETE", leaseUntilEpochMs: 0 }
+      );
+      return this.getWorkspaceView({
+        projectKey: params.projectKey, ecoIssueId: params.ecoIssueId,
+        callerAccountId: params.callerAccountId
+      });
+    }
+
+    let ledgerFinish: (() => Promise<void>) | null = null;
+    let provisionedList: readonly ProvisionedVerificationIssue[];
+    if (this.jira.provisionVerificationIssueSlot &&
+        this.store.getProvisioningLedger &&
+        this.store.insertProvisioningLedger &&
+        this.store.casProvisioningLedger) {
+      const operation = await this.provisionWithDurableLedger({
+        projectKey: params.projectKey,
+        ecoIssueId: params.ecoIssueId,
+        ecoIssueKey: resolvedEcoKey,
+        templateId: params.templateId ?? "AUTOMOTIVE_EV_HELIOS",
+        specs
+      });
+      provisionedList = operation.items;
+      ledgerFinish = operation.finish;
+    } else {
+      // Legacy in-memory integration stubs use the original bulk contract.
+      // The real Forge gateway always implements per-slot durable provisioning.
+      provisionedList = await this.jira.provisionVerificationIssues({
+        projectKey: params.projectKey, ecoIssueKey: resolvedEcoKey, specs
+      });
+    }
 
     const provisionedByEvidenceId = new Map(
       provisionedList.map((p) => [p.evidenceId, p.liveIssue])
@@ -277,7 +365,8 @@ export class LineLockService {
         ...ev,
         jiraIssueId: liveIssue.issueId,
         jiraIssueKey: liveIssue.issueKey,
-        pinnedIssueStateHash: computePinnedIssueStateHash(liveIssue)
+        pinnedIssueStateHash: computePinnedIssueStateHash(liveIssue, 2),
+        hashProjectionVersion: 2 as const
       };
     });
 
@@ -299,6 +388,8 @@ export class LineLockService {
           ...defaultEco,
           ecoJiraIssueId: params.ecoIssueId,
           ecoJiraKey: resolvedEcoKey,
+          projectKey: params.projectKey,
+          projectId: liveEco.projectId,
           ecoCreatedAtEpochMs: nowMs,
           authorAccountId: params.callerAccountId,
           lastEditorAccountId: params.callerAccountId,
@@ -319,6 +410,8 @@ export class LineLockService {
         eco: {
           ...existing.eco,
           ecoJiraKey: resolvedEcoKey,
+          projectKey: params.projectKey,
+          projectId: liveEco.projectId ?? existing.eco.projectId,
           lastEditorAccountId: params.callerAccountId,
           approvalGeneration: existing.eco.approvalGeneration + 1,
           liveEcoStatusCategoryKey: liveEco.statusCategoryKey
@@ -331,11 +424,221 @@ export class LineLockService {
       });
     }
 
+    if (ledgerFinish) await ledgerFinish();
+
     return this.getWorkspaceView({
       projectKey: params.projectKey,
       ecoIssueId: params.ecoIssueId,
       callerAccountId: params.callerAccountId
     });
+  }
+
+  /**
+   * Recovery deliberately requires a human to supply the observed Jira issue.
+   * The app accepts it only when Jira's create-time property matches the exact
+   * ledger operation UUID, parent ECO and obligation. Never guess from summaries.
+   */
+  public async reconcileUncertainProvisioningSlot(params: {
+    readonly ecoIssueId: string;
+    readonly projectKey: string;
+    readonly evidenceId: string;
+    readonly issueKeyOrId: string;
+  }): Promise<EvidenceProvisioningLedger> {
+    await this.ensureProvisionedOrThrow();
+    if (!this.store.getProvisioningLedger || !this.store.casProvisioningLedger ||
+        !this.jira.verifyProvisioningIssueProvenance) {
+      throw new Error("Verified evidence recovery is not configured.");
+    }
+    const ledger = await this.store.getProvisioningLedger(params.ecoIssueId);
+    if (!ledger || ledger.projectKey !== params.projectKey) {
+      throw new Error("No matching evidence provisioning ledger exists for this Jira project.");
+    }
+    if (ledger.status === "IN_PROGRESS" && ledger.leaseUntilEpochMs > this.now()) {
+      throw new ConcurrentModificationError("A provisioning worker still owns this ledger.");
+    }
+    const slot = ledger.slots[params.evidenceId];
+    if (!slot || slot.stage !== "CREATING" || slot.jiraIssueId) {
+      throw new Error("This evidence slot is not awaiting uncertain-creation reconciliation.");
+    }
+    const verified = await this.jira.verifyProvisioningIssueProvenance({
+      issueKeyOrId: params.issueKeyOrId,
+      ecoIssueId: ledger.ecoIssueId,
+      ecoIssueKey: ledger.ecoIssueKey,
+      projectKey: ledger.projectKey,
+      templateId: ledger.templateId,
+      evidenceId: slot.evidenceId,
+      operationId: slot.operationId
+    });
+    return this.store.casProvisioningLedger(ledger.revisionSeq, {
+      ...ledger,
+      status: "FAILED",
+      leaseUntilEpochMs: 0,
+      slots: {
+        ...ledger.slots,
+        [slot.evidenceId]: {
+          ...slot,
+          stage: "CREATED",
+          jiraIssueId: verified.jiraIssueId,
+          jiraIssueKey: verified.jiraIssueKey
+        }
+      }
+    });
+  }
+
+  /**
+   * Crash-safe evidence provisioning on the real Jira gateway. A per-ECO TiDB
+   * ledger serializes workers and preserves each externally committed Jira ID.
+   * A slot with an uncertain POST result is NEVER created twice automatically.
+   */
+  private async provisionWithDurableLedger(params: {
+    readonly ecoIssueId: string;
+    readonly ecoIssueKey: string;
+    readonly projectKey: string;
+    readonly templateId: IndustryTemplateId;
+    readonly specs: readonly VerificationIssueSeedSpec[];
+  }): Promise<{
+    readonly items: readonly ProvisionedVerificationIssue[];
+    readonly finish: () => Promise<void>;
+  }> {
+    if (!this.store.getProvisioningLedger ||
+        !this.store.insertProvisioningLedger ||
+        !this.store.casProvisioningLedger ||
+        !this.jira.provisionVerificationIssueSlot) {
+      throw new Error("Durable slot provisioning requires ledger and Jira slot gateway capabilities.");
+    }
+
+    const leaseMs = 300_000;
+    const now = this.now();
+    const ownerId = randomUUID();
+    const original = await this.store.getProvisioningLedger(params.ecoIssueId);
+    const base: Omit<EvidenceProvisioningLedger, "revisionSeq"> = original
+      ? { ...original, ownerId, leaseUntilEpochMs: now + leaseMs, status: "IN_PROGRESS" }
+      : {
+          ecoIssueId: params.ecoIssueId,
+          ecoIssueKey: params.ecoIssueKey,
+          projectKey: params.projectKey,
+          templateId: params.templateId,
+          ownerId,
+          leaseUntilEpochMs: now + leaseMs,
+          status: "IN_PROGRESS",
+          slots: {}
+        };
+
+    if (original) {
+      if (original.projectKey !== params.projectKey ||
+          original.ecoIssueKey !== params.ecoIssueKey ||
+          original.templateId !== params.templateId) {
+        throw new Error(
+          "Existing provisioning ledger belongs to another project, ECO key, or industry template. Refusing to mix evidence."
+        );
+      }
+      if (original.status === "IN_PROGRESS" && original.leaseUntilEpochMs > now) {
+        throw new ConcurrentModificationError(
+          "Evidence provisioning is already in progress for this ECO. Refresh instead of retrying."
+        );
+      }
+      const uncertain = Object.values(original.slots).find(
+        (slot) => slot.stage === "CREATING" && !slot.jiraIssueId
+      );
+      if (uncertain) {
+        throw new Error(
+          `Provisioning paused: Jira may have created ${uncertain.evidenceId} before the checkpoint. ` +
+          `Locate its Jira issue using provenance operation ID ${uncertain.operationId}; ` +
+          "do not run another create request until an administrator has reconciled this slot."
+        );
+      }
+    }
+
+    let ledger: EvidenceProvisioningLedger = original
+      ? await this.store.casProvisioningLedger(original.revisionSeq, base)
+      : await this.store.insertProvisioningLedger(base);
+
+    const persist = async (
+      patch: (current: EvidenceProvisioningLedger) => Omit<EvidenceProvisioningLedger, "revisionSeq">
+    ) => {
+      // Each asynchronous Jira operation is fenced by an unexpired CAS lease.
+      if (ledger.ownerId !== ownerId || this.now() >= ledger.leaseUntilEpochMs) {
+        throw new ConcurrentModificationError("Provisioning lease expired; stop before another Jira operation.");
+      }
+      const next = patch(ledger);
+      ledger = await this.store.casProvisioningLedger!(
+        ledger.revisionSeq,
+        { ...next, ownerId, leaseUntilEpochMs: this.now() + leaseMs }
+      );
+    };
+
+    const changeSlot = async (slot: EvidenceProvisioningSlot) => {
+      await persist((current) => ({
+        ...current,
+        slots: { ...current.slots, [slot.evidenceId]: slot }
+      }));
+    };
+
+    const items: ProvisionedVerificationIssue[] = [];
+    try {
+      for (const spec of params.specs) {
+        let slot = ledger.slots[spec.evidenceId];
+        if (!slot) {
+          slot = {
+            evidenceId: spec.evidenceId,
+            operationId: randomUUID(),
+            stage: "CREATING"
+          };
+          // This checkpoint happens BEFORE a POST: an ambiguous POST outcome
+          // will never be retried as a fresh issue without human reconciliation.
+          await changeSlot(slot);
+        }
+        if (slot.stage === "CREATING" && slot.jiraIssueId) {
+          slot = { ...slot, stage: "CREATED" };
+        }
+        const initialSlot = slot;
+        const item = await this.jira.provisionVerificationIssueSlot({
+          projectKey: params.projectKey,
+          ecoIssueKey: params.ecoIssueKey,
+          ecoIssueId: params.ecoIssueId,
+          templateId: params.templateId,
+          spec,
+          operationId: initialSlot.operationId,
+          stage: initialSlot.stage,
+          existingIssueId: initialSlot.jiraIssueId,
+          existingIssueKey: initialSlot.jiraIssueKey,
+          callbacks: {
+            onCreated: async (issueId, issueKey) => {
+              await changeSlot({
+                ...initialSlot, stage: "CREATED", jiraIssueId: issueId, jiraIssueKey: issueKey
+              });
+            },
+            onDone: async () => {
+              const current = ledger.slots[spec.evidenceId]!;
+              await changeSlot({
+                ...current,
+                stage: current.stage === "LINKED" ? "LINKED" : "DONE"
+              });
+            },
+            onLinked: async () => {
+              const current = ledger.slots[spec.evidenceId]!;
+              await changeSlot({ ...current, stage: "LINKED" });
+            }
+          }
+        });
+        items.push(item);
+      }
+    } catch (err) {
+      // Keep all per-slot evidence checkpoints even on partial failures.
+      try {
+        await persist((current) => ({ ...current, status: "FAILED", leaseUntilEpochMs: 0 }));
+      } catch {
+        // Never conceal the original Jira error if a competing worker took over.
+      }
+      throw err;
+    }
+
+    return {
+      items,
+      finish: async () => {
+        await persist((current) => ({ ...current, status: "COMPLETE" }));
+      }
+    };
   }
 
   public async commitProposalOperations(params: {
@@ -414,8 +717,10 @@ export class LineLockService {
     readonly ecoIssueId: string;
     readonly request: CounterfactualRequest;
     readonly includeBaselines?: boolean;
+    readonly readOnly?: boolean;
   }): Promise<CounterfactualSimulationResult> {
-    await this.ensureProvisionedOrThrow();
+    if (params.readOnly) await this.requireAlreadyProvisioned();
+    else await this.ensureProvisionedOrThrow();
     const ws = await this.mustLoadWorkspace(params.ecoIssueId);
 
     const proposedOperations = this.buildOperationsForCounterfactual(ws.catalog, params.request);
@@ -497,6 +802,19 @@ export class LineLockService {
   }): Promise<EcoWorkspaceView> {
     await this.ensureProvisionedOrThrow();
 
+    // A viewer must never be able to weaken separation of duties or invalidate signoffs.
+    // Resolve group-backed membership for the invoking user against live Jira project roles.
+    const roleMembers = await this.jira.fetchProjectRoleMembers(
+      params.projectKey,
+      ["Administrators"],
+      [params.callerAccountId]
+    );
+    if (!roleMembers["Administrators"]?.includes(params.callerAccountId)) {
+      throw new AuthorizationError(
+        "Changing governance policy requires membership in the Jira project's Administrators role."
+      );
+    }
+
     const ws = await this.mustLoadWorkspace(params.ecoIssueId);
     if (ws.revisionSeq !== params.expectedRevisionSeq) {
       throw new ConcurrentModificationError(
@@ -534,7 +852,11 @@ export class LineLockService {
             policyId: prodPolicyId,
             policyVersion: nextPolicyVersion,
             requiredAttestationRoles: ["Lead Engineers", "Quality Approvers"],
-            carryForwardDispositionRole: "Power Electronics Disposition Authority",
+            carryForwardDispositionRole: isMedTech
+              ? "Clinical Risk Disposition Authority"
+              : isAero
+                ? "Airworthiness Disposition Authority"
+                : "Power Electronics Disposition Authority",
             enforceSeparationOfDuties: true,
             allowRuleBasedCarryForward: true
           };
@@ -723,7 +1045,8 @@ export class LineLockService {
       return {
         ...ev,
         jiraIssueKey: live.issueKey,
-        pinnedIssueStateHash: computePinnedIssueStateHash(live)
+        pinnedIssueStateHash: computePinnedIssueStateHash(live, 2),
+        hashProjectionVersion: 2 as const
       };
     });
 
@@ -829,9 +1152,10 @@ export class LineLockService {
     };
     const primaryKey = req.primaryNumericAttrKey.trim();
     const primaryUnit = req.primaryNumericUnit.trim();
-    if (!primaryKey || !primaryUnit || !Number.isFinite(req.primaryNumericValue)) {
+    if (!primaryKey || !primaryUnit || !Number.isSafeInteger(req.primaryNumericValue) ||
+        !Number.isSafeInteger(req.primaryNumericScale) || Math.abs(req.primaryNumericScale) > 18) {
       throw new Error(
-        "Valid primaryNumericAttrKey, primaryNumericValue, and primaryNumericUnit are required."
+        "Custom component requires an attribute key, unit, safe-integer mantissa and decimal scale in [-18, 18]."
       );
     }
     const scale = Number.isFinite(req.primaryNumericScale)
@@ -958,18 +1282,23 @@ export class LineLockService {
       );
     }
 
-    if (this.store.registerEvidenceIssueIds) {
-      await this.store.registerEvidenceIssueIds([targetIssue.issueId]);
+    // A pre-existing Done ticket is already past the initial transition.
+    // It must never gain a global release-gate exemption merely by being bound.
+    if (targetIssue.projectKey !== params.projectKey) {
+      throw new AuthorizationError(
+        "Custom qualification evidence must belong to the ECO's Jira project."
+      );
     }
 
-    const pinnedHash = computePinnedIssueStateHash(targetIssue);
+    const pinnedHash = computePinnedIssueStateHash(targetIssue, 2);
     const updatedEvidence = ws.catalog.evidenceRecords.map((ev) =>
       ev.evidenceId === targetEvId
         ? {
             ...ev,
             jiraIssueId: targetIssue.issueId,
             jiraIssueKey: targetIssue.issueKey,
-            pinnedIssueStateHash: pinnedHash
+            pinnedIssueStateHash: pinnedHash,
+            hashProjectionVersion: 2 as const
           }
         : ev
     );
@@ -1012,6 +1341,10 @@ export class LineLockService {
   public async getProjectFleetOverview(params: {
     readonly projectKey: string;
     readonly callerAccountId?: string;
+    /** Runtime-user-filtered, issue-security-aware check, before any aggregation. */
+    readonly canViewWorkspace?: (workspace: StoredEcoWorkspace) => Promise<boolean>;
+    readonly readOnly?: boolean;
+    readonly cursor?: string;
   }): Promise<ProjectFleetOverview> {
     const provisioning = await this.provisioning.inspectStatus();
     const evaluatedAtEpochMs = this.now();
@@ -1046,13 +1379,48 @@ export class LineLockService {
 
     const allWorkspaces = await this.store.listEcoWorkspaces();
     const normalizedProjectKey = params.projectKey.trim().toUpperCase();
-    const matching = allWorkspaces.filter((ws) => {
-      if (!normalizedProjectKey || normalizedProjectKey === "*") return true;
-      const key = ws.eco.ecoJiraKey.trim();
-      if (!key.includes("-")) return true;
-      const prefix = (key.split("-")[0] ?? "").toUpperCase();
-      return prefix === normalizedProjectKey;
+    // Never interpret a missing, malformed, or wildcard key as a request for
+    // all projects. Fleet aggregation must remain project-scoped.
+    if (!/^[A-Z][A-Z0-9_]*$/.test(normalizedProjectKey)) {
+      throw new AuthorizationError("Fleet overview requires a valid, explicit Jira project key.");
+    }
+    const projectCandidates = allWorkspaces.filter((ws) => {
+      if (ws.eco.projectKey) {
+        return ws.eco.projectKey.trim().toUpperCase() === normalizedProjectKey;
+      }
+      // Legacy records have no project identity. Preserve read compatibility
+      // using the old Jira issue-key prefix until explicitly migrated.
+      const key = ws.eco.ecoJiraKey.trim().toUpperCase();
+      const boundary = key.lastIndexOf("-");
+      return boundary > 0 && key.slice(0, boundary) === normalizedProjectKey;
     });
+    // Filtering is performed BEFORE any totals or evidence evaluation so
+    // restricted ECOs cannot leak through aggregate counts or verdicts.
+    const offset = params.cursor === undefined ? 0 : Number(params.cursor);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000) {
+      throw new Error("Invalid Fleet page cursor.");
+    }
+    const pageSize = 25;
+    const neededVisible = offset + pageSize + 1;
+    const permitted: StoredEcoWorkspace[] = [];
+    // Bound Jira permission calls in batches, rather than firing one network
+    // request per ECO simultaneously. Stop as soon as the next-page sentinel
+    // is discovered. No restricted ECO contributes to totals or pagination.
+    for (let from = 0;
+      from < projectCandidates.length && permitted.length < neededVisible;
+      from += 8
+    ) {
+      const batch = projectCandidates.slice(from, from + 8);
+      const access = params.canViewWorkspace
+        ? await Promise.all(batch.map((ws) => params.canViewWorkspace!(ws)))
+        : batch.map(() => true);
+      for (let i = 0; i < batch.length; i++) {
+        if (access[i] && batch[i]) permitted.push(batch[i]!);
+      }
+    }
+    const hasMore = permitted.length > offset + pageSize;
+    const matching = permitted.slice(offset, offset + pageSize);
+    const nextCursor = hasMore ? String(offset + matching.length) : null;
 
     let verifiedReleasedCount = 0;
     let readyCount = 0;
@@ -1079,11 +1447,13 @@ export class LineLockService {
           ? params.projectKey
           : (rawWs.eco.ecoJiraKey.split("-")[0] ?? "ECO");
 
-      const ws = await this.maybeFinalizePendingTransitionIntent(
-        targetProjectKey,
-        rawWs.ecoIssueId,
-        rawWs
-      );
+      const ws = params.readOnly
+        ? rawWs
+        : await this.maybeFinalizePendingTransitionIntent(
+            targetProjectKey,
+            rawWs.ecoIssueId,
+            rawWs
+          );
 
       let evaluated;
       try {
@@ -1165,6 +1535,10 @@ export class LineLockService {
       provisioning,
       evaluatedAtEpochMs,
       totalEcos: ecoRows.length,
+      evaluatedCount: ecoRows.length,
+      hasMore,
+      nextCursor,
+      isPartialPage: hasMore || offset > 0,
       verifiedReleasedCount,
       readyCount,
       awaitingSignoffCount,
@@ -1187,6 +1561,38 @@ export class LineLockService {
     };
   }
 
+  public async configureProjectGovernance(params: {
+    readonly projectKey: string;
+    readonly callerAccountId: string;
+    readonly governedIssueTypeIds: readonly string[];
+  }): Promise<import("./ports").ProjectGovernanceConfig> {
+    await this.ensureProvisionedOrThrow();
+    if (!this.store.getProjectGovernanceConfig ||
+        !this.store.insertProjectGovernanceConfig ||
+        !this.store.casProjectGovernanceConfig) {
+      throw new Error("Governance issue-type configuration is not supported by the active store.");
+    }
+    const projectKey = params.projectKey.trim().toUpperCase();
+    const issueTypeIds = [...new Set(params.governedIssueTypeIds.map((id) => id.trim()))].sort();
+    if (!/^[A-Z][A-Z0-9_]*$/.test(projectKey) ||
+        !params.callerAccountId ||
+        issueTypeIds.length === 0 ||
+        issueTypeIds.length > 20 ||
+        issueTypeIds.some((id) => !/^\d{1,20}$/.test(id))) {
+      throw new Error("Choose 1–20 valid Jira issue-type IDs and a verified administrator identity.");
+    }
+    const existing = await this.store.getProjectGovernanceConfig(projectKey);
+    const next = {
+      projectKey,
+      governedIssueTypeIds: issueTypeIds,
+      updatedByAccountId: params.callerAccountId,
+      updatedAtEpochMs: this.now()
+    };
+    return existing
+      ? this.store.casProjectGovernanceConfig(existing.revisionSeq, next)
+      : this.store.insertProjectGovernanceConfig(next);
+  }
+
   public async validateReleaseTransition(params: {
     readonly projectKey: string;
     readonly ecoIssueId: string;
@@ -1203,20 +1609,60 @@ export class LineLockService {
 
       const ws = await this.store.getEcoWorkspace(params.ecoIssueId);
       if (!ws) {
-        if (this.store.isRegisteredEvidenceIssue) {
-          const isChildEvidenceTicket = await this.store.isRegisteredEvidenceIssue(
-            params.ecoIssueId
-          );
-          if (isChildEvidenceTicket) {
+        // A historical global evidence-ID registry must not be an authorization
+        // capability. An arbitrary Done issue could otherwise be registered and
+        // later transition uninitialized ECOs without verification.
+        //
+        // Only actual Jira issue types determine whether an uninitialized work
+        // item belongs to the configured ECO class. Unknown type fails closed.
+        const liveIssue = await this.jira.fetchLiveIssue(params.ecoIssueId);
+        const config = this.store.getProjectGovernanceConfig
+          ? await this.store.getProjectGovernanceConfig(params.projectKey)
+          : null;
+        if (config) {
+          // Project administrators pin stable Jira issue-type IDs. A missing ID
+          // cannot be interpreted as unrelated and therefore fails closed.
+          if (!liveIssue.issueTypeId) {
+            return {
+              result: false,
+              errorMessage: "LineLock block: Jira did not return issue-type ID for governed-scope verification."
+            };
+          }
+          if (!config.governedIssueTypeIds.includes(liveIssue.issueTypeId)) {
+            return { result: true };
+          }
+        } else {
+          // Compatibility fallback only. Production setups must configure
+          // immutable type IDs in the LineLock Fleet project administration.
+          const issueType = liveIssue.issueTypeName?.trim().toLowerCase();
+          if (
+            issueType &&
+            issueType !== "engineering change order" &&
+            issueType !== "engineering change" &&
+            issueType !== "eco" &&
+            issueType !== "change"
+          ) {
             return { result: true };
           }
         }
         return {
           result: false,
-          errorMessage: `LineLock block: No initialized engineering verification workspace for ECO issue ${params.ecoIssueId}.`
+          errorMessage: `LineLock block: No initialized engineering verification workspace for governed issue ${params.ecoIssueId}.`
         };
       }
 
+      const currentIssue = await this.jira.fetchLiveIssueByKeyOrId(params.ecoIssueId);
+      const projectRenamedOrMoved =
+        currentIssue.projectKey !== params.projectKey ||
+        (ws.eco.projectKey !== undefined && ws.eco.projectKey !== params.projectKey) ||
+        (ws.eco.projectId !== undefined && currentIssue.projectId !== undefined &&
+          ws.eco.projectId !== currentIssue.projectId);
+      if (projectRenamedOrMoved) {
+        return {
+          result: false,
+          errorMessage: "LineLock block: ECO project identity changed. A project administrator must review and reconfigure governance before release."
+        };
+      }
       const liveEval = await this.evaluateWorkspaceAgainstLiveJira(params.projectKey, ws);
       if (liveEval.gateState !== "READY_FOR_RELEASE_TRANSITION") {
         const detail = liveEval.blockingReasons[0] ?? `Current gate state is ${liveEval.gateState}`;
@@ -1406,14 +1852,18 @@ export class LineLockService {
   public async compareCurrentEcoAgainstBaselines(params: {
     readonly projectKey: string;
     readonly ecoIssueId: string;
+    readonly readOnly?: boolean;
   }) {
-    await this.ensureProvisionedOrThrow();
+    if (params.readOnly) await this.requireAlreadyProvisioned();
+    else await this.ensureProvisionedOrThrow();
     let ws = await this.mustLoadWorkspace(params.ecoIssueId);
-    ws = await this.maybeFinalizePendingTransitionIntent(
-      params.projectKey,
-      params.ecoIssueId,
-      ws
-    );
+    if (!params.readOnly) {
+      ws = await this.maybeFinalizePendingTransitionIntent(
+        params.projectKey,
+        params.ecoIssueId,
+        ws
+      );
+    }
     const { liveEco, trustedRoles, liveIssuesById } = await this.fetchLiveVerificationContext(
       params.projectKey,
       ws
@@ -1598,6 +2048,19 @@ export class LineLockService {
       req.targetVariants === "ALL"
         ? "ALL"
         : req.targetVariants.map((v) => normalizeVariantId(v));
+
+    // These are EV-specific counterfactual operations. Never inject an
+    // automotive part or BOM slot into a medical or aerospace catalog.
+    if ((isMedTech || isAero) && req.kind === "GATE_DRIVER_REV_B_CUTOVER") {
+      throw new Error(
+        "Gate-driver revision substitution is an Automotive EV operation. Use a catalog-specific Custom Studio substitution."
+      );
+    }
+    if (isAero && req.kind === "CAP_REV_D_DRAFT_CUTOVER") {
+      throw new Error(
+        "The Aerospace template has no corresponding draft resolver revision. Define the engineering sample in Custom Studio."
+      );
+    }
 
     switch (req.kind) {
       case "CAP_REV_C_CUTOVER":
@@ -1879,7 +2342,7 @@ export class LineLockService {
     const oblCodeById = new Map(ws.catalog.obligations.map((o) => [o.obligationId, o.code]));
     const evidenceIntegrity: LiveEvidenceIntegrityRow[] = ws.catalog.evidenceRecords.map((ev) => {
       const live = liveIssuesById[ev.jiraIssueId];
-      const liveHash = live ? computePinnedIssueStateHash(live) : null;
+      const liveHash = live ? computePinnedIssueStateHash(live, ev.hashProjectionVersion ?? 1) : null;
       const statusIsDone = Boolean(live && live.statusCategoryKey.toLowerCase() === "done");
       return {
         evidenceId: ev.evidenceId,
@@ -1922,6 +2385,17 @@ export class LineLockService {
       roles.add(catalog.policy.carryForwardDispositionRole);
     }
     return [...roles].sort();
+  }
+
+  /** Rovo GET must never trigger lazy DDL or migrations. */
+  private async requireAlreadyProvisioned(): Promise<void> {
+    const status = await this.provisioning.inspectStatus();
+    if (status.state !== "READY") {
+      throw new ProvisioningNotReadyError(
+        status.state,
+        "LineLock SQL is not ready. An administrator must complete provisioning outside Rovo."
+      );
+    }
   }
 
   private async ensureProvisionedOrThrow(): Promise<void> {

@@ -49,10 +49,19 @@ interface JiraIssueRestResponse {
   readonly key: string;
   readonly fields: {
     readonly summary?: string;
+    readonly issuetype?: { readonly id?: string; readonly name?: string };
     readonly description?: unknown;
+    readonly attachment?: readonly {
+      readonly id?: string;
+      readonly filename?: string;
+      readonly size?: number;
+      readonly mimeType?: string;
+      readonly created?: string;
+    }[];
     readonly updated?: string;
     readonly project?: {
       readonly key?: string;
+      readonly id?: string;
     };
     readonly status?: {
       readonly statusCategory?: {
@@ -187,10 +196,17 @@ function buildAuditCommentAdf(markdownText: string): Record<string, unknown> {
  * Forge's runtime proxy returns `UNAVAILABLE_TOKEN_ERROR` on contextless `asApp()`.
  */
 export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
+  constructor(private readonly accessMode: "app" | "user" = "app") {}
+
   private async requestJiraResilient(
     path: ReturnType<typeof route>,
     init?: ForgeRequestInit
   ): Promise<ForgeResponse> {
+    // Rovo's entire live Jira read call graph runs under the principal.
+    // Never fall back from asUser to asApp on missing consent or token errors.
+    if (this.accessMode === "user") {
+      return api.asUser().requestJira(path, init);
+    }
     let primaryErr: unknown;
 
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -252,7 +268,7 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     issueKeyOrId: string
   ): Promise<LiveJiraIssueProjection & { readonly projectKey: string }> {
     const res = await this.requestJiraResilient(
-      route`/rest/api/3/issue/${issueKeyOrId}?fields=summary,description,status,resolution,updated,project`,
+      route`/rest/api/3/issue/${issueKeyOrId}?fields=summary,description,attachment,status,resolution,updated,project,issuetype`,
       { headers: { Accept: "application/json" } }
     );
 
@@ -269,8 +285,21 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       issueId: String(body.id),
       issueKey: body.key,
       projectKey,
+      projectId: body.fields.project?.id,
+      issueTypeId: body.fields.issuetype?.id,
+      issueTypeName: body.fields.issuetype?.name,
       summary: body.fields.summary ?? "",
       description: extractAdfPlainText(body.fields.description),
+      descriptionAdf: body.fields.description ?? null,
+      attachmentMetadata: (body.fields.attachment ?? [])
+        .filter((a) => a.id && a.filename)
+        .map((a) => ({
+          id: a.id!,
+          filename: a.filename!,
+          size: a.size ?? 0,
+          mimeType: a.mimeType ?? "",
+          created: a.created ?? ""
+        })),
       statusCategoryKey: body.fields.status?.statusCategory?.key ?? "unknown",
       resolutionName: body.fields.resolution?.name ?? null,
       updatedAtEpochMs: Number.isFinite(updatedMs) ? updatedMs : 0,
@@ -406,6 +435,11 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
   }): Promise<readonly ProvisionedVerificationIssue[]> {
     const issueTypeId = await this.resolveStandardIssueTypeId(params.projectKey);
     const linkTypeName = await this.resolveDefaultLinkTypeName();
+    if (params.ecoIssueKey && !linkTypeName) {
+      throw new Error(
+        "Cannot provision traceable qualification issues: Jira issue linking is unavailable or the app cannot read link types."
+      );
+    }
 
     const createdItems: {
       readonly evidenceId: string;
@@ -457,21 +491,22 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       await this.transitionIssueToDoneCategory(item.id);
 
       if (linkTypeName && params.ecoIssueKey) {
-        try {
-          await this.requestJiraResilient(route`/rest/api/3/issueLink`, {
-            method: "POST",
-            headers: {
-              Accept: "application/json",
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              type: { name: linkTypeName },
-              inwardIssue: { key: item.key },
-              outwardIssue: { key: params.ecoIssueKey }
-            })
-          });
-        } catch {
-          // Non-fatal if link permissions or custom schemes restrict issueLink
+        const linkRes = await this.requestJiraResilient(route`/rest/api/3/issueLink`, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            type: { name: linkTypeName },
+            inwardIssue: { key: item.key },
+            outwardIssue: { key: params.ecoIssueKey }
+          })
+        });
+        if (!linkRes.ok) {
+          throw new Error(
+            `Qualification ticket ${item.key} could not be linked to ECO ${params.ecoIssueKey}: Jira HTTP ${linkRes.status}. Resolve link permissions before continuing.`
+          );
         }
       }
 
@@ -483,6 +518,168 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     }
 
     return provisioned;
+  }
+
+  public async verifyProvisioningIssueProvenance(params: {
+    readonly issueKeyOrId: string;
+    readonly ecoIssueId: string;
+    readonly ecoIssueKey: string;
+    readonly projectKey: string;
+    readonly templateId: import("../scenarios/industryTemplates").IndustryTemplateId;
+    readonly evidenceId: string;
+    readonly operationId: string;
+  }): Promise<{ readonly jiraIssueId: string; readonly jiraIssueKey: string }> {
+    const issue = await this.fetchLiveIssueByKeyOrId(params.issueKeyOrId);
+    if (issue.projectKey !== params.projectKey) {
+      throw new Error("Recovery candidate belongs to the wrong Jira project.");
+    }
+    const propRes = await this.requestJiraResilient(
+      route`/rest/api/3/issue/${issue.issueId}/properties/linelock.provenance`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (!propRes.ok) {
+      throw new Error("Recovery candidate has no LineLock provenance property.");
+    }
+    const prop = (await propRes.json()) as { readonly value?: Record<string, unknown> };
+    const fields = {
+      ecoIssueId: params.ecoIssueId,
+      ecoIssueKey: params.ecoIssueKey,
+      projectKey: params.projectKey,
+      templateId: params.templateId,
+      evidenceId: params.evidenceId,
+      operationId: params.operationId
+    };
+    for (const [key, expected] of Object.entries(fields)) {
+      if (prop.value?.[key] !== expected) {
+        throw new Error(`Recovery candidate fails immutable LineLock provenance: ${key}.`);
+      }
+    }
+    return { jiraIssueId: issue.issueId, jiraIssueKey: issue.issueKey };
+  }
+
+  /**
+   * Idempotent per-slot completion with Jira-native provenance on the original
+   * create request. A missing SQL checkpoint after an uncertain POST is deliberately
+   * never retried automatically by the service.
+   */
+  public async provisionVerificationIssueSlot(params: {
+    readonly projectKey: string;
+    readonly ecoIssueKey: string;
+    readonly ecoIssueId: string;
+    readonly templateId: import("../scenarios/industryTemplates").IndustryTemplateId;
+    readonly spec: VerificationIssueSeedSpec;
+    readonly operationId: string;
+    readonly stage?: import("./ports").EvidenceSlotStage;
+    readonly existingIssueId?: string;
+    readonly existingIssueKey?: string;
+    readonly callbacks: import("./ports").CreateEvidenceSlotCallbacks;
+  }): Promise<ProvisionedVerificationIssue> {
+    const provenance = {
+      ecoIssueId: params.ecoIssueId,
+      ecoIssueKey: params.ecoIssueKey,
+      projectKey: params.projectKey,
+      templateId: params.templateId,
+      evidenceId: params.spec.evidenceId,
+      operationId: params.operationId
+    };
+
+    let issueId = params.existingIssueId ?? "";
+    let issueKey = params.existingIssueKey ?? "";
+    if (!issueId) {
+      const issueTypeId = await this.resolveStandardIssueTypeId(params.projectKey);
+      const createRes = await this.requestJiraResilient(route`/rest/api/3/issue`, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fields: {
+            project: { key: params.projectKey },
+            issuetype: { id: issueTypeId },
+            summary: params.spec.summary,
+            description: buildAdfDocument(params.spec.description)
+          },
+          properties: [{ key: "linelock.provenance", value: provenance }]
+        })
+      });
+      if (!createRes.ok) {
+        throw new Error(
+          `Qualification issue creation failed for ${params.spec.evidenceId}: HTTP ${createRes.status}. The slot is marked uncertain until reviewed.`
+        );
+      }
+      const created = (await createRes.json()) as { readonly id: string; readonly key: string };
+      issueId = String(created.id);
+      issueKey = created.key;
+      // Persist Jira identity immediately, before any further Jira write.
+      await params.callbacks.onCreated(issueId, issueKey);
+    } else {
+      // Never trust a user-entered issue ID or stale checkpoint without verifying
+      // the atomically written Jira property and immutable parent identity.
+      const propRes = await this.requestJiraResilient(
+        route`/rest/api/3/issue/${issueId}/properties/linelock.provenance`
+      );
+      if (!propRes.ok) {
+        throw new Error(`Cannot verify provenance for qualification issue ${issueId}.`);
+      }
+      const prop = (await propRes.json()) as { readonly value?: Record<string, unknown> };
+      for (const [field, expected] of Object.entries(provenance)) {
+        if (prop.value?.[field] !== expected) {
+          throw new Error(`Qualification issue ${issueId} has mismatched provenance: ${field}.`);
+        }
+      }
+    }
+
+    const live = await this.fetchLiveIssue(issueId);
+    if (live.statusCategoryKey.toLowerCase() !== "done") {
+      await this.transitionIssueToDoneCategory(issueId);
+    }
+    await params.callbacks.onDone();
+
+    const linksRes = await this.requestJiraResilient(
+      route`/rest/api/3/issue/${issueId}?fields=issuelinks`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (!linksRes.ok) {
+      throw new Error(`Cannot verify parent ECO link for qualification issue ${issueId}.`);
+    }
+    const linksBody = (await linksRes.json()) as {
+      readonly fields?: {
+        readonly issuelinks?: readonly {
+          readonly inwardIssue?: { readonly id?: string; readonly key?: string };
+          readonly outwardIssue?: { readonly id?: string; readonly key?: string };
+        }[];
+      };
+    };
+    const alreadyLinked = (linksBody.fields?.issuelinks ?? []).some(
+      (link) => link.inwardIssue?.id === params.ecoIssueId ||
+        link.outwardIssue?.id === params.ecoIssueId ||
+        link.inwardIssue?.key === params.ecoIssueKey ||
+        link.outwardIssue?.key === params.ecoIssueKey
+    );
+    if (!alreadyLinked) {
+      const typeName = await this.resolveDefaultLinkTypeName();
+      if (!typeName) {
+        throw new Error("Jira issue linking is unavailable; qualification evidence is incomplete.");
+      }
+      const linkRes = await this.requestJiraResilient(route`/rest/api/3/issueLink`, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: { name: typeName },
+          inwardIssue: { key: issueKey || issueId },
+          outwardIssue: { key: params.ecoIssueKey }
+        })
+      });
+      if (!linkRes.ok) {
+        throw new Error(
+          `Jira refused the qualification link to ${params.ecoIssueKey}: HTTP ${linkRes.status}.`
+        );
+      }
+    }
+    await params.callbacks.onLinked();
+    const complete = await this.fetchLiveIssue(issueId);
+    if (complete.statusCategoryKey.toLowerCase() !== "done") {
+      throw new Error(`Qualification issue ${issueId} is no longer in Done.`);
+    }
+    return { evidenceId: params.spec.evidenceId, liveIssue: complete };
   }
 
   public async postIssueComment(params: {
@@ -673,7 +870,9 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     );
 
     if (!transRes.ok) {
-      return;
+      throw new Error(
+        `Cannot inspect available transitions for qualification issue ${issueId}: HTTP ${transRes.status}.`
+      );
     }
 
     const body = (await transRes.json()) as JiraTransitionsResponse;
@@ -681,10 +880,12 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       (t) => t.to?.statusCategory?.key?.toLowerCase() === "done"
     );
     if (!doneTransition) {
-      return;
+      throw new Error(
+        `Qualification issue ${issueId} has no direct transition to Done. Configure a valid workflow or complete the necessary intermediate transitions manually.`
+      );
     }
 
-    await this.requestJiraResilient(route`/rest/api/3/issue/${issueId}/transitions`, {
+    const postRes = await this.requestJiraResilient(route`/rest/api/3/issue/${issueId}/transitions`, {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -694,6 +895,17 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
         transition: { id: doneTransition.id }
       })
     });
+    if (!postRes.ok) {
+      throw new Error(
+        `Jira refused the Done transition for qualification issue ${issueId}: HTTP ${postRes.status}.`
+      );
+    }
+    const live = await this.fetchLiveIssue(issueId);
+    if (live.statusCategoryKey.toLowerCase() !== "done") {
+      throw new Error(
+        `Jira accepted the transition request but qualification issue ${issueId} is still ${live.statusCategoryKey}, not Done.`
+      );
+    }
   }
 
   private async resolveDefaultLinkTypeName(): Promise<string | null> {

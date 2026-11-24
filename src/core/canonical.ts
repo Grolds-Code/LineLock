@@ -75,7 +75,34 @@ function normalizeScalarMap(map: Readonly<Record<string, ScalarValue>>): Record<
   return out;
 }
 
-export function computePinnedIssueStateHash(issue: LiveJiraIssueProjection): string {
+export function computePinnedIssueStateHash(
+  issue: LiveJiraIssueProjection,
+  version: 1 | 2 = 1
+): string {
+  if (version === 2) {
+    const attachmentMetadata = [...(issue.attachmentMetadata ?? [])]
+      .map((a) => ({
+        id: a.id,
+        filename: a.filename,
+        size: a.size,
+        mimeType: a.mimeType,
+        created: a.created
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const v2Projection = {
+      projectionVersion: 2,
+      issueId: issue.issueId,
+      summary: issue.summary,
+      descriptionAdf: issue.descriptionAdf ?? issue.description,
+      statusCategoryKey: issue.statusCategoryKey.toLowerCase(),
+      resolutionName: issue.resolutionName ?? null,
+      structuredFields: normalizeScalarMap(issue.structuredFields),
+      attachmentMetadata
+    };
+    return sha256Hex(canonicalizeJson(v2Projection));
+  }
+  // DO NOT change this v1 projection: persisted Jira pins and existing
+  // release snapshots depend on these exact keys and serialization.
   const projection = {
     projectionVersion: 1,
     issueId: issue.issueId,
@@ -153,19 +180,25 @@ function normalizeEvidence(
   liveIssuesById: Readonly<Record<string, LiveJiraIssueProjection>>
 ): unknown {
   const live = liveIssuesById[ev.jiraIssueId];
-  return {
+  const v1Shape = {
     evidenceId: ev.evidenceId,
     obligationId: ev.obligationId,
     jiraIssueId: ev.jiraIssueId,
     pinnedIssueStateHash: ev.pinnedIssueStateHash,
     liveStatusCategoryKey: live ? live.statusCategoryKey.toLowerCase() : "MISSING",
-    liveIssueStateHash: live ? computePinnedIssueStateHash(live) : "MISSING",
+    liveIssueStateHash: live ? computePinnedIssueStateHash(
+      live, ev.hashProjectionVersion ?? 1
+    ) : "MISSING",
     testedVariantId: ev.testedVariantId,
     testedSlotBinding: ev.testedSlotBinding,
     testedOperatingConditions: normalizeScalarMap(ev.testedOperatingConditions),
     recordedOutcome: ev.recordedOutcome,
     approvalStatus: ev.approvalStatus
   };
+  // Missing or explicit version 1 must normalize identically to historic v1.
+  return ev.hashProjectionVersion === 2
+    ? { ...v1Shape, hashProjectionVersion: 2 }
+    : v1Shape;
 }
 
 function normalizeCarryForwardRule(rule: CarryForwardRule): unknown {

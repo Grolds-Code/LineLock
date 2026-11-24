@@ -46,6 +46,43 @@ export interface StoredEcoWorkspace {
   readonly unvalidatedDriftDetected: boolean;
 }
 
+/** Durable, per-ECO state machine; intentionally separate from release snapshots. */
+export type EvidenceSlotStage = "CREATING" | "CREATED" | "DONE" | "LINKED";
+export interface EvidenceProvisioningSlot {
+  readonly evidenceId: string;
+  readonly operationId: string;
+  readonly stage: EvidenceSlotStage;
+  readonly jiraIssueId?: string;
+  readonly jiraIssueKey?: string;
+}
+
+export interface EvidenceProvisioningLedger {
+  readonly ecoIssueId: string;
+  readonly ecoIssueKey: string;
+  readonly projectKey: string;
+  readonly templateId: IndustryTemplateId;
+  readonly ownerId: string;
+  readonly leaseUntilEpochMs: number;
+  readonly status: "IN_PROGRESS" | "FAILED" | "COMPLETE";
+  readonly slots: Readonly<Record<string, EvidenceProvisioningSlot>>;
+  /** TiDB compare-and-swap revision, unrelated to the ECO approval generation. */
+  readonly revisionSeq: number;
+}
+
+export interface CreateEvidenceSlotCallbacks {
+  readonly onCreated: (issueId: string, issueKey: string) => Promise<void>;
+  readonly onDone: () => Promise<void>;
+  readonly onLinked: () => Promise<void>;
+}
+
+export interface ProjectGovernanceConfig {
+  readonly projectKey: string;
+  readonly governedIssueTypeIds: readonly string[];
+  readonly updatedByAccountId: string;
+  readonly updatedAtEpochMs: number;
+  readonly revisionSeq: number;
+}
+
 export interface VerificationStore {
   getEcoWorkspace(ecoIssueId: string): Promise<StoredEcoWorkspace | null>;
   listEcoWorkspaces?(): Promise<readonly StoredEcoWorkspace[]>;
@@ -58,6 +95,22 @@ export interface VerificationStore {
   ): Promise<StoredEcoWorkspace>;
   registerEvidenceIssueIds?(issueIds: readonly string[]): Promise<void>;
   isRegisteredEvidenceIssue?(issueId: string): Promise<boolean>;
+  getProvisioningLedger?(ecoIssueId: string): Promise<EvidenceProvisioningLedger | null>;
+  insertProvisioningLedger?(
+    ledger: Omit<EvidenceProvisioningLedger, "revisionSeq">
+  ): Promise<EvidenceProvisioningLedger>;
+  casProvisioningLedger?(
+    expectedRevisionSeq: number,
+    ledger: Omit<EvidenceProvisioningLedger, "revisionSeq">
+  ): Promise<EvidenceProvisioningLedger>;
+  getProjectGovernanceConfig?(projectKey: string): Promise<ProjectGovernanceConfig | null>;
+  insertProjectGovernanceConfig?(
+    config: Omit<ProjectGovernanceConfig, "revisionSeq">
+  ): Promise<ProjectGovernanceConfig>;
+  casProjectGovernanceConfig?(
+    expectedRevisionSeq: number,
+    config: Omit<ProjectGovernanceConfig, "revisionSeq">
+  ): Promise<ProjectGovernanceConfig>;
 }
 
 export interface ConnectivityProbeResult {
@@ -93,6 +146,28 @@ export interface JiraPlatformGateway {
     requiredRoles: readonly string[],
     candidateAccountIds?: readonly string[]
   ): Promise<Record<string, readonly string[]>>;
+  /** Per-slot recoverable provisioning. Older test adapters may implement bulk only. */
+  verifyProvisioningIssueProvenance?(params: {
+    readonly issueKeyOrId: string;
+    readonly ecoIssueId: string;
+    readonly ecoIssueKey: string;
+    readonly projectKey: string;
+    readonly templateId: IndustryTemplateId;
+    readonly evidenceId: string;
+    readonly operationId: string;
+  }): Promise<{ readonly jiraIssueId: string; readonly jiraIssueKey: string }>;
+  provisionVerificationIssueSlot?(params: {
+    readonly projectKey: string;
+    readonly ecoIssueKey: string;
+    readonly ecoIssueId: string;
+    readonly templateId: IndustryTemplateId;
+    readonly spec: VerificationIssueSeedSpec;
+    readonly operationId: string;
+    readonly stage?: EvidenceSlotStage;
+    readonly existingIssueId?: string;
+    readonly existingIssueKey?: string;
+    readonly callbacks: CreateEvidenceSlotCallbacks;
+  }): Promise<ProvisionedVerificationIssue>;
   provisionVerificationIssues(params: {
     readonly projectKey: string;
     readonly ecoIssueKey: string;
@@ -141,6 +216,8 @@ export interface EcoWorkspaceView {
   readonly evidenceIntegrity?: readonly LiveEvidenceIntegrityRow[];
   readonly releaseAssuranceMarkdown?: string;
   readonly baselineSummary?: BaselineTotalsSummary;
+  /** Live Jira is Done while receipt promotion has not been persisted. */
+  readonly reconciliationStatus?: "PENDING_RELEASE_RECONCILIATION";
 }
 
 export type ScenarioPresetId =
@@ -238,7 +315,12 @@ export interface ProjectFleetOverview {
   readonly projectKey: string;
   readonly provisioning: ProvisioningStatusReport;
   readonly evaluatedAtEpochMs: number;
+  /** Counts on this visible, bounded page only, never a secret project-wide total. */
   readonly totalEcos: number;
+  readonly evaluatedCount?: number;
+  readonly hasMore?: boolean;
+  readonly nextCursor?: string | null;
+  readonly isPartialPage?: boolean;
   readonly verifiedReleasedCount: number;
   readonly readyCount: number;
   readonly awaitingSignoffCount: number;

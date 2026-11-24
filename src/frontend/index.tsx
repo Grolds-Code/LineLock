@@ -44,6 +44,7 @@ import type {
   CounterfactualSimulationResult,
   CustomComponentSubstitutionRequest,
   EcoWorkspaceView,
+  EvidenceProvisioningLedger,
   GovernancePolicyMode,
   ScenarioPresetId
 } from "../forge/ports";
@@ -52,6 +53,14 @@ import {
   type IndustryTemplateDescriptor,
   type IndustryTemplateId
 } from "../scenarios/templateMetadata";
+
+/** Preserve legitimate zero inputs and reject partial integer parses. */
+function safeIntegerOrDefault(raw: string, fallback: number): number {
+  const normalized = raw.trim();
+  if (!normalized) return fallback;
+  const value = Number(normalized);
+  return Number.isSafeInteger(value) ? value : fallback;
+}
 
 function unwrapInvoke<T>(raw: T | { readonly body: T }): T {
   if (raw && typeof raw === "object" && "body" in raw) {
@@ -357,6 +366,10 @@ const LineLockAssuranceCockpit: React.FC = () => {
   const [customSerialFrom, setCustomSerialFrom] = useState<string>("5000");
   const [customSerialTo, setCustomSerialTo] = useState<string>("");
 
+  const [recoveryLedger, setRecoveryLedger] = useState<EvidenceProvisioningLedger | null>(null);
+  const [recoveryEvidenceId, setRecoveryEvidenceId] = useState<string>("");
+  const [recoveryJiraIssue, setRecoveryJiraIssue] = useState<string>("");
+
   const [bindEvidenceId, setBindEvidenceId] = useState<string>("EV-400-RIPPLE");
   const [bindJiraKey, setBindJiraKey] = useState<string>("");
 
@@ -478,8 +491,8 @@ const LineLockAssuranceCockpit: React.FC = () => {
           ? {
               kind: "AMBIENT_ENVELOPE_SHIFT",
               variantId: cfVariantScope === "ALL" ? fallbackVariant : cfVariantScope,
-              minAmbientC: Number.parseInt(cfMinAmbient, 10) || -20,
-              maxAmbientC: Number.parseInt(cfMaxAmbient, 10) || 58
+              minAmbientC: safeIntegerOrDefault(cfMinAmbient, -20),
+              maxAmbientC: safeIntegerOrDefault(cfMaxAmbient, 58)
             }
           : {
               kind: cfKind,
@@ -532,8 +545,8 @@ const LineLockAssuranceCockpit: React.FC = () => {
         specStatus: customSpecStatus,
         targetSlotPath: customSlotPath,
         primaryNumericAttrKey: customAttrKey,
-        primaryNumericValue: Number.parseInt(customAttrValue, 10) || 0,
-        primaryNumericScale: Number.parseInt(customAttrScale, 10) || 0,
+        primaryNumericValue: safeIntegerOrDefault(customAttrValue, 0),
+        primaryNumericScale: safeIntegerOrDefault(customAttrScale, 0),
         primaryNumericUnit: customAttrUnit,
         secondaryEnumAttrKey: customEnumKey.trim() || undefined,
         secondaryEnumValue: customEnumValue.trim() || undefined,
@@ -663,6 +676,38 @@ const LineLockAssuranceCockpit: React.FC = () => {
       await refreshView();
     });
 
+  const inspectInterruptedProvisioning = (): Promise<void> =>
+    runAction("inspect-provisioning", async () => {
+      const ledger = unwrapInvoke(
+        await invoke<EvidenceProvisioningLedger | null>("getEvidenceProvisioningLedger")
+      );
+      setRecoveryLedger(ledger);
+      const uncertain = Object.values(ledger?.slots ?? {}).find(
+        (slot) => slot.stage === "CREATING" && !slot.jiraIssueId
+      );
+      setRecoveryEvidenceId(uncertain?.evidenceId ?? "");
+      setStatusNotice(ledger
+        ? `Provisioning: ${ledger.status}; ${Object.keys(ledger.slots).length}/6 evidence slots recorded.`
+        : "No interrupted evidence provisioning ledger exists for this ECO.");
+    });
+
+  const reconcileInterruptedProvisioning = (): Promise<void> =>
+    runAction("reconcile-provisioning", async () => {
+      if (!recoveryEvidenceId.trim() || !recoveryJiraIssue.trim()) {
+        throw new Error("Select an uncertain evidence ID and enter its actual Jira issue key.");
+      }
+      const ledger = unwrapInvoke(
+        await invoke<EvidenceProvisioningLedger>("reconcileUncertainProvisioningSlot", {
+          evidenceId: recoveryEvidenceId.trim(),
+          issueKeyOrId: recoveryJiraIssue.trim()
+        })
+      );
+      setRecoveryLedger(ledger);
+      setStatusNotice(
+        `Verified ${recoveryJiraIssue} against immutable Jira provenance. Resume setup using the existing Provision button; no new ticket is created for the recovered slot.`
+      );
+    });
+
   const handleRecoverSql = (): Promise<void> =>
     runAction("recover-sql", async () => {
       await invoke("triggerProvisioningRecovery");
@@ -773,6 +818,26 @@ const LineLockAssuranceCockpit: React.FC = () => {
 
   const leafSlots = collectGovernedLeafSlots(workspace?.catalog);
 
+  // Give a generalist judge the release decision before specialized K3 proof traces.
+  const unsupportedObligations = evaluation?.sliceObligations.filter(
+    (item) => item.status !== "SUPPORTED_AS_TESTED" &&
+      item.status !== "SUPPORTED_BY_APPROVED_RULE"
+  ) ?? [];
+  const affectedVariants = [...new Set(unsupportedObligations.map((item) => item.variantId))];
+  const requiredRetests = evaluation?.remediationPlans.reduce(
+    (total, plan) => total + plan.selectedActions.length, 0
+  ) ?? 0;
+  const missingSignoffs = evaluation?.attestationSummary.missingRoles ?? [];
+  const executiveNextStep = requiredRetests > 0
+    ? `Run ${requiredRetests} targeted qualification ${requiredRetests === 1 ? "test" : "tests"} or use the simulator to narrow the affected serials.`
+    : missingSignoffs.length > 0
+      ? `Obtain the required signoff: ${missingSignoffs.join(", ")}.`
+      : evaluation?.gateState === "RELEASE_TRANSITIONED_VERIFIED"
+        ? "The release receipt is recorded and matches the verified evidence."
+        : evaluation?.transitionAllowed
+          ? "The ECO has satisfied the evidence gate. Complete the controlled Jira transition."
+          : "Review the first blocking reason, inspect evidence integrity, and resolve any missing configuration or approvals.";
+
   return (
     <Stack space="space.200">
       {/* Top Executive Gate Header */}
@@ -832,7 +897,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
 
           <Inline space="space.100" alignBlock="center" shouldWrap>
             <Tag text={`SQL: ${view?.provisioning.state ?? "CHECKING"}`} color="teal" />
-            <Tag text="Runs on Atlassian" color="blue" />
+            <Tag text="Forge-native · no external egress" color="blue" />
             {workspace ? (
               <Tag text={activeTemplate.standardReference} color="purple" />
             ) : null}
@@ -849,6 +914,36 @@ const LineLockAssuranceCockpit: React.FC = () => {
           </Inline>
         </Stack>
       </Box>
+
+      {workspace && evaluation ? (
+        <Box xcss={cardBoxStyle}>
+          <Stack space="space.100">
+            <Heading size="medium">
+              {evaluation.gateState === "RELEASE_TRANSITIONED_VERIFIED"
+                ? "Release verified"
+                : evaluation.transitionAllowed
+                  ? "Release ready for controlled transition"
+                  : "Release blocked until verification is complete"}
+            </Heading>
+            <Text>
+              {unsupportedObligations.length > 0
+                ? `${unsupportedObligations.length} configuration-specific evidence obligations need attention${affectedVariants.length > 0 ? ` across ${affectedVariants.join(", ")}` : ""}.`
+                : "All configuration-specific evidence obligations are supported by recorded tests or approved rules."}
+            </Text>
+            {evaluation.blockingReasons.length > 0 ? (
+              <Text>{`Why: ${evaluation.blockingReasons[0]}`}</Text>
+            ) : null}
+            <Text>{`Next action: ${executiveNextStep}`}</Text>
+            {!workspace.catalog.policy.enforceSeparationOfDuties ? (
+              <SectionMessage appearance="warning" title="Evaluation mode: separation of duties waived">
+                <Text>
+                  This workspace uses a single-evaluator demonstration policy, not the production multi-role approval standard.
+                </Text>
+              </SectionMessage>
+            ) : null}
+          </Stack>
+        </Box>
+      ) : null}
 
       {errorMsg ? (
         <SectionMessage appearance="error" title="Verification / Governance Rejection">
@@ -932,6 +1027,51 @@ const LineLockAssuranceCockpit: React.FC = () => {
                 Seed Offline Reference IDs Only
               </LoadingButton>
             </Inline>
+            <SectionMessage appearance="information" title="Interrupted setup? Resume safely">
+              <Stack space="space.100">
+                <Text>
+                  LineLock checkpoints each qualification issue. If Jira created a ticket but
+                  failed to return its ID, it will not create a duplicate. An administrator can
+                  inspect the ledger and reconcile the exact Jira ticket by its provenance.
+                </Text>
+                <LoadingButton
+                  isLoading={busyAction === "inspect-provisioning"}
+                  onClick={inspectInterruptedProvisioning}
+                >
+                  Inspect Provisioning Recovery
+                </LoadingButton>
+                {recoveryLedger ? (
+                  <Text>{`Ledger: ${recoveryLedger.status}; ${Object.keys(recoveryLedger.slots).length} evidence slots recorded.`}</Text>
+                ) : null}
+                {recoveryLedger && Object.values(recoveryLedger.slots).some(
+                  (slot) => slot.stage === "CREATING" && !slot.jiraIssueId
+                ) ? (
+                  <Stack space="space.100">
+                    <Text>
+                      An ambiguous Jira creation needs manual verification before setup can continue.
+                      Locate the ticket in Jira and enter its key below.
+                    </Text>
+                    <Textfield
+                      placeholder="Evidence ID reported by provisioning"
+                      value={recoveryEvidenceId}
+                      onChange={(e) => setRecoveryEvidenceId(extractEventString(e))}
+                    />
+                    <Textfield
+                      placeholder="Created Jira issue key, e.g. ECO-8"
+                      value={recoveryJiraIssue}
+                      onChange={(e) => setRecoveryJiraIssue(extractEventString(e))}
+                    />
+                    <LoadingButton
+                      appearance="primary"
+                      isLoading={busyAction === "reconcile-provisioning"}
+                      onClick={reconcileInterruptedProvisioning}
+                    >
+                      Verify Jira Provenance and Recover Slot
+                    </LoadingButton>
+                  </Stack>
+                ) : null}
+              </Stack>
+            </SectionMessage>
           </Stack>
         </Box>
       ) : null}
@@ -940,11 +1080,11 @@ const LineLockAssuranceCockpit: React.FC = () => {
       {workspace && evaluation ? (
         <Tabs id="linelock-cockpit-tabs">
           <TabList>
-            <Tab>Assurance Matrix &amp; K3 Proof</Tab>
-            <Tab>Counterfactual &amp; Remediation</Tab>
-            <Tab>Custom Studio &amp; Jira Binding</Tab>
-            <Tab>Governance &amp; ABA Signoff</Tab>
-            <Tab>Jira Evidence &amp; Diagnostics</Tab>
+            <Tab>Evidence &amp; K3</Tab>
+            <Tab>Simulate &amp; Fix</Tab>
+            <Tab>Custom Engineering</Tab>
+            <Tab>Approvals &amp; SoD</Tab>
+            <Tab>Jira Audit</Tab>
           </TabList>
 
           {/* TAB 1: ASSURANCE MATRIX & K3 PROOF */}

@@ -184,7 +184,7 @@ function checkLiveEvidenceIntegrity(
       reason: `Linked Jira issue "${ev.jiraIssueKey}" statusCategory is "${live.statusCategoryKey}" (expected "done")`
     };
   }
-  const liveHash = computePinnedIssueStateHash(live);
+  const liveHash = computePinnedIssueStateHash(live, ev.hashProjectionVersion ?? 1);
   if (liveHash !== ev.pinnedIssueStateHash) {
     return {
       valid: false,

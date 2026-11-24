@@ -27,7 +27,8 @@ export function createRovoActionHandlers(params: {
       const issue = await resolveIssue(payload?.issueKey);
       const view = await service.getWorkspaceView({
         projectKey: issue.projectKey,
-        ecoIssueId: issue.issueId
+        ecoIssueId: issue.issueId,
+        readOnly: true
       });
 
       if (!view.workspace || !view.evaluation) {
@@ -47,6 +48,7 @@ export function createRovoActionHandlers(params: {
         approvalGeneration: view.evaluation.approvalGeneration,
         policyVersion: view.evaluation.policyVersion,
         gateState: view.evaluation.gateState,
+        reconciliationStatus: view.reconciliationStatus ?? null,
         transitionAllowed: view.evaluation.transitionAllowed,
         blockingReasons: view.evaluation.blockingReasons,
         sliceObligations: view.evaluation.sliceObligations.map((so) => ({
@@ -99,7 +101,8 @@ export function createRovoActionHandlers(params: {
           serialFrom,
           serialTo
         },
-        includeBaselines: true
+        includeBaselines: true,
+        readOnly: true
       });
 
       return {
@@ -129,7 +132,8 @@ export function createRovoActionHandlers(params: {
       const issue = await resolveIssue(payload?.issueKey);
       const cmp = await service.compareCurrentEcoAgainstBaselines({
         projectKey: issue.projectKey,
-        ecoIssueId: issue.issueId
+        ecoIssueId: issue.issueId,
+        readOnly: true
       });
 
       const discrepancies = cmp.linelock.sliceObligations
@@ -169,13 +173,18 @@ export function createRovoActionHandlers(params: {
       };
     },
 
-    async inspectProjectFleet(payload: { readonly projectKey?: string }) {
+    async inspectProjectFleet(
+      payload: { readonly projectKey?: string },
+      options?: { readonly canViewWorkspace?: (ws: import("./ports").StoredEcoWorkspace) => Promise<boolean> }
+    ) {
       const pk = typeof payload?.projectKey === "string" ? payload.projectKey.trim() : "";
       if (!pk) {
         throw new Error("Input `projectKey` (e.g. 'ECO') is required.");
       }
       const overview = await service.getProjectFleetOverview({
-        projectKey: pk
+        projectKey: pk,
+        readOnly: true,
+        canViewWorkspace: options?.canViewWorkspace
       });
       return {
         authority: "READ_ONLY_DETERMINISTIC_FLEET_KERNEL",

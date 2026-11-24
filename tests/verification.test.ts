@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { ForgeSQLAPIError, errorCodes } from "@forge/sql";
 import {
   canonicalizeJson,
+  compareExactQuantities,
   computePinnedIssueStateHash,
   computeSnapshotSha256,
   evaluateB0TimestampStatus,
@@ -187,6 +188,82 @@ function createTestHarness(options?: { readonly clusterEnabled?: boolean }) {
 }
 
 describe("LineLock Vertical Slice — Core Engine, Adversarial Counterexamples & Forge Consistency", () => {
+  it("preserves historic v1 evidence snapshots and detects v2 ADF/attachment changes", () => {
+    const input = createHeliosVerificationInput();
+    const project = (catalog: typeof input.catalog) => computeSnapshotSha256({
+      catalog,
+      eco: input.eco,
+      proposedOperations: input.proposedOperations,
+      liveVerificationIssuesById: input.liveVerificationIssuesById
+    });
+    const oldSnapshot = project(input.catalog);
+    const explicitV1 = {
+      ...input.catalog,
+      evidenceRecords: input.catalog.evidenceRecords.map(
+        (ev) => ({ ...ev, hashProjectionVersion: 1 as const })
+      )
+    };
+    expect(project(explicitV1)).toBe(oldSnapshot);
+
+    const issue = Object.values(input.liveVerificationIssuesById)[0]!;
+    const withRaw = {
+      ...issue,
+      descriptionAdf: {
+        type: "doc", version: 1,
+        content: [{ type: "paragraph", content: [{ type: "text", text: issue.description }] }]
+      },
+      attachmentMetadata: [{
+        id: "att-001", filename: "calibration.pdf", size: 2048,
+        mimeType: "application/pdf", created: "2026-01-02T00:00:00.000Z"
+      }]
+    };
+    const changedRaw = {
+      ...withRaw,
+      descriptionAdf: {
+        type: "doc", version: 1,
+        content: [{ type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: issue.description }] }]
+      }
+    };
+    expect(computePinnedIssueStateHash(withRaw, 1)).toBe(
+      computePinnedIssueStateHash(changedRaw, 1)
+    );
+    expect(computePinnedIssueStateHash(withRaw, 2)).not.toBe(
+      computePinnedIssueStateHash(changedRaw, 2)
+    );
+    expect(computePinnedIssueStateHash(withRaw, 2)).not.toBe(
+      computePinnedIssueStateHash({
+        ...withRaw,
+        attachmentMetadata: [{ ...withRaw.attachmentMetadata[0]!, size: 2049 }]
+      }, 2)
+    );
+
+    const upgraded = {
+      ...input.catalog,
+      evidenceRecords: input.catalog.evidenceRecords.map((ev) => ({
+        ...ev,
+        hashProjectionVersion: 2 as const,
+        pinnedIssueStateHash: computePinnedIssueStateHash(
+          input.liveVerificationIssuesById[ev.jiraIssueId]!, 2
+        )
+      }))
+    };
+    expect(project(upgraded)).not.toBe(oldSnapshot);
+  });
+
+  it("rejects billion-digit decimal expansion and unsafe numeric scales before allocation", () => {
+    expect(() => qty(1, -1_000_000_000, "V")).toThrow(RangeError);
+    expect(() => qty(1, 1_000_000_000, "V")).toThrow(RangeError);
+    expect(() => qty(1, 0, "V")).not.toThrow();
+    expect(() => compareExactQuantities(
+      { mantissa: 1n, scale: -1_000_000_000, unit: "V" },
+      { mantissa: 1n, scale: 0, unit: "V" }
+    )).toThrow(RangeError);
+    expect(compareExactQuantities(
+      { mantissa: 250n, scale: -2, unit: "V" },
+      { mantissa: 25n, scale: -1, unit: "V" }
+    )).toEqual({ comparable: true, cmp: 0 });
+  });
+
   it("T00: enforces strict pure-kernel trust boundary (zero @forge/* or network imports in src/core)", () => {
     const coreDir = join(process.cwd(), "src", "core");
     const files = readdirSync(coreDir).filter((f) => f.endsWith(".ts"));

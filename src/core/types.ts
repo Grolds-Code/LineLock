@@ -144,6 +144,8 @@ export interface VerificationEvidence {
   readonly jiraIssueId: string;
   readonly jiraIssueKey: string;
   readonly pinnedIssueStateHash: string;
+  /** Missing version is byte-for-byte compatible with historic v1 snapshots. */
+  readonly hashProjectionVersion?: 1 | 2;
   readonly testedVariantId: string;
   /**
    * Complete map of governedSlotPaths -> itemRevId present in the physical test article.
@@ -195,8 +197,23 @@ export type ChangeOperation =
 export interface LiveJiraIssueProjection {
   readonly issueId: string;
   readonly issueKey: string;
+  readonly projectKey?: string;
+  readonly projectId?: string;
+  /** Jira's server-provided issue type identity, excluded from v1 evidence/snapshot hashes. */
+  readonly issueTypeId?: string;
+  readonly issueTypeName?: string;
   readonly summary: string;
   readonly description: string;
+  /** Raw Jira Atlassian Document Format, available for v2 evidence hashing. */
+  readonly descriptionAdf?: unknown;
+  /** Attachment metadata only, not attachment bytes. */
+  readonly attachmentMetadata?: readonly {
+    readonly id: string;
+    readonly filename: string;
+    readonly size: number;
+    readonly mimeType: string;
+    readonly created: string;
+  }[];
   readonly statusCategoryKey: "done" | "indeterminate" | "new" | string;
   readonly resolutionName: string | null;
   readonly updatedAtEpochMs: number;
@@ -249,6 +266,9 @@ export interface FinalizedReleaseReceipt {
 export interface EcoMetadata {
   readonly ecoJiraIssueId: string;
   readonly ecoJiraKey: string;
+  /** Optional for backwards-compatible persisted workspaces; excluded from v1 SHA. */
+  readonly projectKey?: string;
+  readonly projectId?: string;
   readonly ecoCreatedAtEpochMs: number;
   readonly authorAccountId: string;
   readonly lastEditorAccountId: string;
@@ -404,8 +424,10 @@ export interface VerificationEvaluation {
 }
 
 export const qty = (mantissa: number, scale: number, unit: string): ScalarValue => {
-  if (!Number.isSafeInteger(mantissa) || !Number.isSafeInteger(scale)) {
-    throw new RangeError(`Quantity mantissa (${mantissa}) and scale (${scale}) must be safe integers.`);
+  if (!Number.isSafeInteger(mantissa) || !Number.isSafeInteger(scale) || Math.abs(scale) > 18) {
+    throw new RangeError(
+      `Quantity mantissa (${mantissa}) must be a safe integer and scale (${scale}) must be an integer in [-18, 18].`
+    );
   }
   if (!unit || unit.trim() !== unit) {
     throw new RangeError(`Quantity unit must be a non-empty canonical symbol, got "${unit}".`);

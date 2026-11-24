@@ -1,4 +1,11 @@
 import Resolver from "@forge/resolver";
+import {
+  assertUserCanReadIssue,
+  assertUserCanReadProject,
+  assertUserIssuePermissions,
+  assertUserProjectPermissions,
+  listUserProjectIssueTypes
+} from "./userAuthorization";
 import { Queue } from "@forge/events";
 import type { ChangeOperation } from "../core/types";
 import { buildHeliosCapRevCSubstitution } from "../scenarios/heliosBatteryPack";
@@ -9,7 +16,8 @@ import type {
   CustomComponentSubstitutionRequest,
   GovernancePolicyMode,
   IndustryTemplateId,
-  ScenarioPresetId
+  ScenarioPresetId,
+  StoredEcoWorkspace
 } from "./ports";
 import { SqlProvisioningManager } from "./provisioning";
 import { createRovoActionHandlers } from "./rovo";
@@ -18,7 +26,8 @@ import { ForgeSqlCasStore } from "./sqlStore";
 
 const provisioningManager = new SqlProvisioningManager();
 const sqlStore = new ForgeSqlCasStore();
-const jiraGateway = new ForgeJiraPlatformGateway();
+const jiraGateway = new ForgeJiraPlatformGateway("app");
+const userScopedRovoGateway = new ForgeJiraPlatformGateway("user");
 
 export const defaultLineLockService = new LineLockService({
   store: sqlStore,
@@ -26,9 +35,17 @@ export const defaultLineLockService = new LineLockService({
   provisioning: provisioningManager
 });
 
+// This service shares deterministic kernel and SQL state but never uses
+// app-privileged Jira reads when invoked by Rovo's GET actions.
+const userScopedRovoService = new LineLockService({
+  store: sqlStore,
+  jira: userScopedRovoGateway,
+  provisioning: provisioningManager
+});
+
 const rovoHandlers = createRovoActionHandlers({
-  service: defaultLineLockService,
-  jira: jiraGateway
+  service: userScopedRovoService,
+  jira: userScopedRovoGateway
 });
 
 const schemaMigrationQueue = new Queue({ key: "schema-migration-queue" });
@@ -77,23 +94,91 @@ function extractProjectContext(rawContext: unknown): {
   return { accountId, projectKey };
 }
 
+/** Authorization is checked against Jira as the invoking user, never asApp. */
+async function assertWorkspaceVisible(ws: StoredEcoWorkspace): Promise<void> {
+  await assertUserCanReadIssue(ws.ecoIssueId);
+  // A readable ECO is not permission to disclose restricted linked lab issues.
+  // All evidence must be accessible to the user before a detailed view is exposed.
+  await Promise.all(
+    ws.catalog.evidenceRecords.map((ev) => assertUserCanReadIssue(ev.jiraIssueId))
+  );
+}
+
+async function assertExistingWorkspaceVisible(issueId: string): Promise<void> {
+  const state = await provisioningManager.inspectStatus();
+  if (state.state !== "READY") return;
+  const ws = await sqlStore.getEcoWorkspace(issueId);
+  if (ws) await assertWorkspaceVisible(ws);
+}
+
+async function canViewWorkspace(ws: StoredEcoWorkspace): Promise<boolean> {
+  try {
+    await assertWorkspaceVisible(ws);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function authorizedWorkspaceView(params: {
+  readonly projectKey: string;
+  readonly ecoIssueId: string;
+  readonly callerAccountId?: string;
+}) {
+  await assertUserCanReadIssue(params.ecoIssueId);
+  // Complete authorization must happen BEFORE getWorkspaceView can reconcile
+  // a pending release receipt or read restricted evidence under app privileges.
+  await assertExistingWorkspaceVisible(params.ecoIssueId);
+  const view = await defaultLineLockService.getWorkspaceView(params);
+  if (view.workspace) await assertWorkspaceVisible(view.workspace);
+  return view;
+}
+
+/** Rovo's issue key is untrusted tool input, even when inferred from chat context. */
+function resolveRovoIssueKey(payload: unknown): string {
+  const p = (payload ?? {}) as {
+    readonly issueKey?: string;
+    readonly context?: {
+      readonly issueKey?: string;
+      readonly jira?: { readonly issueKey?: string };
+    };
+  };
+  const candidate = p.issueKey ?? p.context?.jira?.issueKey ?? p.context?.issueKey;
+  const key = typeof candidate === "string" ? candidate.trim() : "";
+  if (!key) throw new Error("Select a Jira engineering change or supply its issue key.");
+  return key;
+}
+
+async function authorizeRovoIssue(issueKey: string): Promise<void> {
+  await assertUserCanReadIssue(issueKey);
+  const provisioning = await provisioningManager.inspectStatus();
+  if (provisioning.state !== "READY") return;
+  const issue = await userScopedRovoGateway.fetchLiveIssueByKeyOrId(issueKey);
+  const ws = await sqlStore.getEcoWorkspace(issue.issueId);
+  if (ws) await assertWorkspaceVisible(ws);
+}
+
 const resolver = new Resolver();
 
 resolver.define("probeConnectivity", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserCanReadIssue(ctx.issueId);
   return defaultLineLockService.runConnectivityProbe({
     projectKey: ctx.projectKey,
     issueId: ctx.issueId
   });
 });
 
-resolver.define("triggerProvisioningRecovery", async () => {
+resolver.define("triggerProvisioningRecovery", async (req) => {
+  const ctx = extractProjectContext(req.context);
+  await assertUserProjectPermissions(ctx.projectKey, ["ADMINISTER_PROJECTS"]);
   return defaultLineLockService.triggerProvisioningRecovery("manual-panel-recovery");
 });
 
 resolver.define("getWorkspaceView", async (req) => {
   const ctx = extractIssueContext(req.context);
-  return defaultLineLockService.getWorkspaceView({
+  await assertUserCanReadIssue(ctx.issueId);
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -101,16 +186,82 @@ resolver.define("getWorkspaceView", async (req) => {
 });
 
 resolver.define("getProjectFleetOverview", async (req) => {
-  const payload = (req.payload ?? {}) as { readonly projectKey?: string };
   const ctx = extractProjectContext(req.context);
+  const payload = (req.payload ?? {}) as { readonly cursor?: string };
+  // Only cursor is accepted from the client; project identity is Forge-signed.
+  await assertUserCanReadProject(ctx.projectKey);
   return defaultLineLockService.getProjectFleetOverview({
-    projectKey: payload.projectKey?.trim() || ctx.projectKey,
-    callerAccountId: ctx.accountId
+    projectKey: ctx.projectKey,
+    callerAccountId: ctx.accountId,
+    canViewWorkspace,
+    cursor: payload.cursor
+  });
+});
+
+resolver.define("getProjectGovernanceSetup", async (req) => {
+  const ctx = extractProjectContext(req.context);
+  await assertUserCanReadProject(ctx.projectKey);
+  return {
+    config: await sqlStore.getProjectGovernanceConfig(ctx.projectKey),
+    issueTypes: await listUserProjectIssueTypes(ctx.projectKey)
+  };
+});
+
+resolver.define("setProjectGovernanceIssueTypes", async (req) => {
+  const ctx = extractProjectContext(req.context);
+  await assertUserProjectPermissions(ctx.projectKey, ["ADMINISTER_PROJECTS"]);
+  const payload = (req.payload ?? {}) as { readonly issueTypeIds?: readonly string[] };
+  if (!Array.isArray(payload.issueTypeIds)) {
+    throw new Error("Select governed Jira issue types from the project's available types.");
+  }
+  const available = await listUserProjectIssueTypes(ctx.projectKey);
+  const byId = new Map(available.map((type) => [type.id, type.name]));
+  for (const id of payload.issueTypeIds) {
+    const name = byId.get(id);
+    if (!name) throw new Error(`Unknown Jira issue-type ID ${id} in this project.`);
+    if (["task", "story", "bug", "sub-task", "subtask"].includes(name.trim().toLowerCase())) {
+      throw new Error(
+        `Cannot govern broad Jira type "${name}" with this release-only validator. ` +
+        "Create a dedicated Engineering Change Order issue type to avoid blocking qualification tickets."
+      );
+    }
+  }
+  return defaultLineLockService.configureProjectGovernance({
+    projectKey: ctx.projectKey,
+    callerAccountId: ctx.accountId,
+    governedIssueTypeIds: payload.issueTypeIds
+  });
+});
+
+resolver.define("getEvidenceProvisioningLedger", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  await assertUserProjectPermissions(ctx.projectKey, ["ADMINISTER_PROJECTS"]);
+  return sqlStore.getProvisioningLedger(ctx.issueId);
+});
+
+resolver.define("reconcileUncertainProvisioningSlot", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  await assertUserProjectPermissions(ctx.projectKey, ["ADMINISTER_PROJECTS"]);
+  const payload = (req.payload ?? {}) as {
+    readonly evidenceId?: string;
+    readonly issueKeyOrId?: string;
+  };
+  if (!payload.evidenceId?.trim() || !payload.issueKeyOrId?.trim()) {
+    throw new Error("Recovery requires an evidence ID and the created Jira issue key.");
+  }
+  await assertUserCanReadIssue(payload.issueKeyOrId);
+  return defaultLineLockService.reconcileUncertainProvisioningSlot({
+    ecoIssueId: ctx.issueId,
+    projectKey: ctx.projectKey,
+    evidenceId: payload.evidenceId.trim(),
+    issueKeyOrId: payload.issueKeyOrId.trim()
   });
 });
 
 resolver.define("seedHeliosWorkspace", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as { readonly templateId?: IndustryTemplateId };
   await defaultLineLockService.seedReferenceWorkspace({
     ecoIssueId: ctx.issueId,
@@ -118,7 +269,7 @@ resolver.define("seedHeliosWorkspace", async (req) => {
     callerAccountId: ctx.accountId,
     templateId: payload.templateId
   });
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -127,6 +278,9 @@ resolver.define("seedHeliosWorkspace", async (req) => {
 
 resolver.define("provisionLiveJiraWorkspace", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
+    await assertUserProjectPermissions(ctx.projectKey, ["CREATE_ISSUES", "TRANSITION_ISSUES"]);
   const payload = (req.payload ?? {}) as { readonly templateId?: IndustryTemplateId };
   return defaultLineLockService.provisionLiveJiraWorkspace({
     projectKey: ctx.projectKey,
@@ -139,6 +293,8 @@ resolver.define("provisionLiveJiraWorkspace", async (req) => {
 
 resolver.define("applyScenarioPreset", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly presetId: ScenarioPresetId;
@@ -154,6 +310,8 @@ resolver.define("applyScenarioPreset", async (req) => {
 
 resolver.define("simulateCounterfactual", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserCanReadIssue(ctx.issueId);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as {
     readonly request: CounterfactualRequest;
     readonly includeBaselines?: boolean;
@@ -168,6 +326,8 @@ resolver.define("simulateCounterfactual", async (req) => {
 
 resolver.define("commitCounterfactualOperations", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly proposedOperations: readonly ChangeOperation[];
@@ -179,7 +339,7 @@ resolver.define("commitCounterfactualOperations", async (req) => {
     callerAccountId: ctx.accountId,
     proposedOperations: payload.proposedOperations
   });
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -188,6 +348,8 @@ resolver.define("commitCounterfactualOperations", async (req) => {
 
 resolver.define("authorCustomComponentSubstitution", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly request: CustomComponentSubstitutionRequest;
@@ -203,10 +365,13 @@ resolver.define("authorCustomComponentSubstitution", async (req) => {
 
 resolver.define("bindCustomJiraEvidenceTicket", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly request: BindJiraEvidenceRequest;
   };
+  await assertUserCanReadIssue(payload.request.jiraIssueKeyOrId);
   return defaultLineLockService.bindCustomJiraEvidenceTicket({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
@@ -218,6 +383,8 @@ resolver.define("bindCustomJiraEvidenceTicket", async (req) => {
 
 resolver.define("switchGovernancePolicyMode", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserProjectPermissions(ctx.projectKey, ["ADMINISTER_PROJECTS"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly mode: GovernancePolicyMode;
@@ -233,6 +400,8 @@ resolver.define("switchGovernancePolicyMode", async (req) => {
 
 resolver.define("proposeCapRevCFrom5000", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly targetVariants?: "ALL" | readonly string[];
@@ -257,7 +426,7 @@ resolver.define("proposeCapRevCFrom5000", async (req) => {
     callerAccountId: ctx.accountId,
     proposedOperations: ops
   });
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -266,6 +435,8 @@ resolver.define("proposeCapRevCFrom5000", async (req) => {
 
 resolver.define("revertToBaselineBom", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as { readonly expectedRevisionSeq: number };
   await defaultLineLockService.commitProposalOperations({
     projectKey: ctx.projectKey,
@@ -274,7 +445,7 @@ resolver.define("revertToBaselineBom", async (req) => {
     callerAccountId: ctx.accountId,
     proposedOperations: []
   });
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -283,6 +454,8 @@ resolver.define("revertToBaselineBom", async (req) => {
 
 resolver.define("signRoleAttestation", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserCanReadIssue(ctx.issueId);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly expectedSnapshotSha256: string;
@@ -300,7 +473,7 @@ resolver.define("signRoleAttestation", async (req) => {
     roleName: payload.roleName,
     rationale: payload.rationale
   });
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -309,6 +482,8 @@ resolver.define("signRoleAttestation", async (req) => {
 
 resolver.define("repinLiveEvidenceHashes", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   const payload = (req.payload ?? {}) as { readonly expectedRevisionSeq: number };
   return defaultLineLockService.repinLiveEvidenceHashes({
     projectKey: ctx.projectKey,
@@ -320,6 +495,8 @@ resolver.define("repinLiveEvidenceHashes", async (req) => {
 
 resolver.define("postAuditRecordComment", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["ADD_COMMENTS"]);
+  await assertExistingWorkspaceVisible(ctx.issueId);
   return defaultLineLockService.postAuditRecordComment({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
@@ -395,7 +572,9 @@ export async function migrationQueueConsumerHandler(event: {
 }
 
 export async function rovoInspectEcoHandler(payload: { readonly issueKey?: string }) {
-  return rovoHandlers.inspectEcoAssurance(payload);
+  const issueKey = resolveRovoIssueKey(payload);
+  await authorizeRovoIssue(issueKey);
+  return rovoHandlers.inspectEcoAssurance({ ...payload, issueKey });
 }
 
 export async function rovoSimulateCutoverHandler(payload: {
@@ -404,15 +583,21 @@ export async function rovoSimulateCutoverHandler(payload: {
   readonly serialFrom?: number;
   readonly serialTo?: number;
 }) {
-  return rovoHandlers.simulateSerialCutover(payload);
+  const issueKey = resolveRovoIssueKey(payload);
+  await authorizeRovoIssue(issueKey);
+  return rovoHandlers.simulateSerialCutover({ ...payload, issueKey });
 }
 
 export async function rovoCompareBaselinesHandler(payload: { readonly issueKey?: string }) {
-  return rovoHandlers.compareBaselines(payload);
+  const issueKey = resolveRovoIssueKey(payload);
+  await authorizeRovoIssue(issueKey);
+  return rovoHandlers.compareBaselines({ ...payload, issueKey });
 }
 
 export async function rovoFleetOverviewHandler(payload: { readonly projectKey?: string }) {
-  return rovoHandlers.inspectProjectFleet(payload);
+  const key = payload.projectKey?.trim() ?? "";
+  await assertUserCanReadProject(key);
+  return rovoHandlers.inspectProjectFleet({ projectKey: key }, { canViewWorkspace });
 }
 
 export * from "./ports";

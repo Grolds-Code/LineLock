@@ -74,6 +74,7 @@ class MultiEcoJiraGatewayStub implements JiraPlatformGateway {
       issueId: "70001",
       issueKey: "ECO-77",
       projectKey: "ECO",
+      issueTypeName: "Task",
       summary: "External Lab ISO/IEC 17025 HV Thermal Ripple Protocol Report #77",
       description: "Signed external chamber report for VAR_400V HV ripple.",
       statusCategoryKey: "done",
@@ -135,6 +136,7 @@ class MultiEcoJiraGatewayStub implements JiraPlatformGateway {
         issueId: id,
         issueKey: key,
         projectKey: params.projectKey,
+        issueTypeName: "Task",
         summary: spec.summary,
         description: spec.description,
         statusCategoryKey: "done",
@@ -192,6 +194,93 @@ function buildPhase4Harness() {
 }
 
 describe("Phase 4: Multi-Industry Templates, Custom Authoring Studio, Live Jira Binding & Space-Wide Fleet Portfolio", () => {
+  it("paginates at 25 caller-visible ECOs without leaking restricted rows into counts", async () => {
+    const { service, jira } = buildPhase4Harness();
+    for (let n = 0; n < 30; n++) {
+      const issueId = String(990000 + n);
+      const issueKey = `ECO-${500 + n}`;
+      jira.issuesById.set(issueId, {
+        issueId, issueKey, projectKey: "ECO",
+        issueTypeId: "10200", issueTypeName: "Engineering Change Order",
+        summary: `Safety-controlled change ${n}`,
+        description: "Fleet page fixture", statusCategoryKey: "new",
+        resolutionName: null, updatedAtEpochMs: HELIOS_BASE_EPOCH_MS + n,
+        structuredFields: {}
+      });
+      await service.seedReferenceWorkspace({
+        ecoIssueId: issueId, ecoIssueKey: issueKey,
+        callerAccountId: "acct-author", templateId: "AUTOMOTIVE_EV_HELIOS"
+      });
+    }
+    const first = await service.getProjectFleetOverview({ projectKey: "ECO" });
+    expect(first.totalEcos).toBe(25);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toBe("25");
+    expect(first.isPartialPage).toBe(true);
+
+    const second = await service.getProjectFleetOverview({
+      projectKey: "ECO", cursor: first.nextCursor!
+    });
+    expect(second.totalEcos).toBe(5);
+    expect(second.hasMore).toBe(false);
+    const allKeys = [...first.ecos, ...second.ecos].map((eco) => eco.ecoIssueKey);
+    expect(new Set(allKeys).size).toBe(30);
+
+    const visibleOnly = await service.getProjectFleetOverview({
+      projectKey: "ECO",
+      canViewWorkspace: async (ws) => Number(ws.ecoIssueId) % 2 === 0
+    });
+    expect(visibleOnly.totalEcos).toBe(15);
+    expect(visibleOnly.hasMore).toBe(false);
+    expect(visibleOnly.ecos.every((row) => Number(row.ecoIssueId) % 2 === 0)).toBe(true);
+    await expect(service.getProjectFleetOverview({
+      projectKey: "ECO", cursor: "-1"
+    })).rejects.toThrow(/Invalid Fleet page cursor/);
+  });
+
+  it("ignores stale global evidence registry grants for an uninitialized ECO and allows ordinary Tasks", async () => {
+    const { service, store, jira, provisioning } = buildPhase4Harness();
+    await provisioning.runMigrations("install");
+    const live = {
+      projectKey: "ECO",
+      description: "Attempted evidence-registration bypass",
+      statusCategoryKey: "new",
+      resolutionName: null,
+      updatedAtEpochMs: HELIOS_BASE_EPOCH_MS,
+      structuredFields: {}
+    } as const;
+    jira.issuesById.set("99700", {
+      ...live,
+      issueId: "99700",
+      issueKey: "ECO-99",
+      issueTypeName: "Engineering Change Order",
+      summary: "Uninitialized governed ECO"
+    });
+    jira.issuesById.set("99701", {
+      ...live,
+      issueId: "99701",
+      issueKey: "ECO-100",
+      issueTypeName: "Task",
+      summary: "Unrelated Jira work item"
+    });
+
+    // Legacy installations can contain stale globally registered IDs.
+    await store.registerEvidenceIssueIds(["99700"]);
+    const governed = await service.validateReleaseTransition({
+      projectKey: "ECO", ecoIssueId: "99700", actorAccountId: "acct-author"
+    });
+    expect(governed.result).toBe(false);
+    expect(governed.errorMessage).toContain("No initialized");
+
+    const ordinaryTask = await service.validateReleaseTransition({
+      projectKey: "ECO", ecoIssueId: "99701", actorAccountId: "acct-author"
+    });
+    expect(ordinaryTask.result).toBe(true);
+    await expect(service.getProjectFleetOverview({ projectKey: "*" })).rejects.toThrow(
+      "valid, explicit Jira project key"
+    );
+  });
+
   it("provisions MedTech Class III IEC 60601 Infusion Pump and verifies Adult ICU carry-forward vs Neonatal NICU Strong Kleene K3 FALSE block", async () => {
     const { service } = buildPhase4Harness();
 
@@ -227,6 +316,16 @@ describe("Phase 4: Multi-Industry Templates, Custom Authoring Studio, Live Jira 
     expect(nicuFlow?.validityTrace?.value).toBe("FALSE");
     expect(adultFlow?.status).toBe("SUPPORTED_BY_APPROVED_RULE");
     expect(adultFlow?.appliedCarryForwardRuleId).toBe("CFR-MED-FLOW-ADULT");
+
+    await expect(service.simulateCounterfactual({
+      projectKey: "ECO",
+      ecoIssueId: "66402",
+      request: {
+        kind: "GATE_DRIVER_REV_B_CUTOVER",
+        targetVariants: "ALL",
+        serialFrom: 5000
+      }
+    })).rejects.toThrow(/Automotive EV operation/);
 
     // Scoping Flow Sensor Rev B strictly to VAR_ADULT_ICU eliminates physical retests!
     const scopedAdult = await service.applyScenarioPreset({
@@ -273,6 +372,16 @@ describe("Phase 4: Multi-Industry Templates, Custom Authoring Studio, Live Jira 
     });
     expect(simReg.delta.simulatedGateState).toBe("AWAITING_ATTESTATION");
     expect(simReg.delta.simulatedRequiredRetests).toBe(0);
+
+    await expect(service.simulateCounterfactual({
+      projectKey: "ECO",
+      ecoIssueId: "66403",
+      request: {
+        kind: "CAP_REV_D_DRAFT_CUTOVER",
+        targetVariants: "ALL",
+        serialFrom: 5000
+      }
+    })).rejects.toThrow(/no corresponding draft resolver revision/);
   });
 
   it("authors custom APPROVED vs DRAFT components and binds existing Done Jira evidence tickets via CAS + generation increment", async () => {
