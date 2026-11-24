@@ -45,6 +45,8 @@ import {
   type ConnectivityProbeResult,
   type CounterfactualRequest,
   type CounterfactualSimulationResult,
+  type EvidenceProvisioningLedger,
+  type EvidenceProvisioningSlot,
   type CustomComponentSubstitutionRequest,
   type EcoWorkspaceView,
   type FleetEcoSummaryRow,
@@ -53,6 +55,7 @@ import {
   type LiveEvidenceIntegrityRow,
   type ProjectFleetOverview,
   type ProvisioningStatusReport,
+  type ProvisionedVerificationIssue,
   type ScenarioPresetId,
   type StoredEcoWorkspace,
   type VerificationIssueSeedSpec,
@@ -265,13 +268,58 @@ export class LineLockService {
       };
     });
 
-    // No global transition exemption registry is created. Jira issue-type
-    // scoping allows ordinary qualification Tasks to reach Done safely.
-    const provisionedList = await this.jira.provisionVerificationIssues({
-      projectKey: params.projectKey,
-      ecoIssueKey: resolvedEcoKey,
-      specs
-    });
+    // An existing provisioned workspace must never be destroyed by a double-click.
+    const existingWorkspace = await this.store.getEcoWorkspace(params.ecoIssueId);
+    const existingLedger = this.store.getProvisioningLedger
+      ? await this.store.getProvisioningLedger(params.ecoIssueId)
+      : null;
+    if (existingWorkspace && (!existingLedger || existingLedger.status === "COMPLETE")) {
+      if (existingWorkspace.catalog.familyId !== templateCatalog.familyId) {
+        throw new Error("This ECO already belongs to another industry template. Provisioning cannot overwrite it.");
+      }
+      return this.getWorkspaceView({
+        projectKey: params.projectKey,
+        ecoIssueId: params.ecoIssueId,
+        callerAccountId: params.callerAccountId
+      });
+    }
+    if (existingWorkspace && existingLedger &&
+        Object.keys(existingLedger.slots).length === specs.length &&
+        Object.values(existingLedger.slots).every((slot) => slot.stage === "LINKED")) {
+      // A crash may occur after committing the workspace but before closing the
+      // ledger. Mark the operation complete without rewriting the ECO or approvals.
+      await this.store.casProvisioningLedger!(
+        existingLedger.revisionSeq,
+        { ...existingLedger, status: "COMPLETE", leaseUntilEpochMs: 0 }
+      );
+      return this.getWorkspaceView({
+        projectKey: params.projectKey, ecoIssueId: params.ecoIssueId,
+        callerAccountId: params.callerAccountId
+      });
+    }
+
+    let ledgerFinish: (() => Promise<void>) | null = null;
+    let provisionedList: readonly ProvisionedVerificationIssue[];
+    if (this.jira.provisionVerificationIssueSlot &&
+        this.store.getProvisioningLedger &&
+        this.store.insertProvisioningLedger &&
+        this.store.casProvisioningLedger) {
+      const operation = await this.provisionWithDurableLedger({
+        projectKey: params.projectKey,
+        ecoIssueId: params.ecoIssueId,
+        ecoIssueKey: resolvedEcoKey,
+        templateId: params.templateId ?? "AUTOMOTIVE_EV_HELIOS",
+        specs
+      });
+      provisionedList = operation.items;
+      ledgerFinish = operation.finish;
+    } else {
+      // Legacy in-memory integration stubs use the original bulk contract.
+      // The real Forge gateway always implements per-slot durable provisioning.
+      provisionedList = await this.jira.provisionVerificationIssues({
+        projectKey: params.projectKey, ecoIssueKey: resolvedEcoKey, specs
+      });
+    }
 
     const provisionedByEvidenceId = new Map(
       provisionedList.map((p) => [p.evidenceId, p.liveIssue])
@@ -340,11 +388,169 @@ export class LineLockService {
       });
     }
 
+    if (ledgerFinish) await ledgerFinish();
+
     return this.getWorkspaceView({
       projectKey: params.projectKey,
       ecoIssueId: params.ecoIssueId,
       callerAccountId: params.callerAccountId
     });
+  }
+
+  /**
+   * Crash-safe evidence provisioning on the real Jira gateway. A per-ECO TiDB
+   * ledger serializes workers and preserves each externally committed Jira ID.
+   * A slot with an uncertain POST result is NEVER created twice automatically.
+   */
+  private async provisionWithDurableLedger(params: {
+    readonly ecoIssueId: string;
+    readonly ecoIssueKey: string;
+    readonly projectKey: string;
+    readonly templateId: IndustryTemplateId;
+    readonly specs: readonly VerificationIssueSeedSpec[];
+  }): Promise<{
+    readonly items: readonly ProvisionedVerificationIssue[];
+    readonly finish: () => Promise<void>;
+  }> {
+    if (!this.store.getProvisioningLedger ||
+        !this.store.insertProvisioningLedger ||
+        !this.store.casProvisioningLedger ||
+        !this.jira.provisionVerificationIssueSlot) {
+      throw new Error("Durable slot provisioning requires ledger and Jira slot gateway capabilities.");
+    }
+
+    const leaseMs = 300_000;
+    const now = this.now();
+    const ownerId = randomUUID();
+    const original = await this.store.getProvisioningLedger(params.ecoIssueId);
+    const base: Omit<EvidenceProvisioningLedger, "revisionSeq"> = original
+      ? { ...original, ownerId, leaseUntilEpochMs: now + leaseMs, status: "IN_PROGRESS" }
+      : {
+          ecoIssueId: params.ecoIssueId,
+          ecoIssueKey: params.ecoIssueKey,
+          projectKey: params.projectKey,
+          templateId: params.templateId,
+          ownerId,
+          leaseUntilEpochMs: now + leaseMs,
+          status: "IN_PROGRESS",
+          slots: {}
+        };
+
+    if (original) {
+      if (original.projectKey !== params.projectKey ||
+          original.ecoIssueKey !== params.ecoIssueKey ||
+          original.templateId !== params.templateId) {
+        throw new Error(
+          "Existing provisioning ledger belongs to another project, ECO key, or industry template. Refusing to mix evidence."
+        );
+      }
+      if (original.status === "IN_PROGRESS" && original.leaseUntilEpochMs > now) {
+        throw new ConcurrentModificationError(
+          "Evidence provisioning is already in progress for this ECO. Refresh instead of retrying."
+        );
+      }
+      const uncertain = Object.values(original.slots).find(
+        (slot) => slot.stage === "CREATING" && !slot.jiraIssueId
+      );
+      if (uncertain) {
+        throw new Error(
+          `Provisioning paused: Jira may have created ${uncertain.evidenceId} before the checkpoint. ` +
+          `Locate its Jira issue using provenance operation ID ${uncertain.operationId}; ` +
+          "do not run another create request until an administrator has reconciled this slot."
+        );
+      }
+    }
+
+    let ledger: EvidenceProvisioningLedger = original
+      ? await this.store.casProvisioningLedger(original.revisionSeq, base)
+      : await this.store.insertProvisioningLedger(base);
+
+    const persist = async (
+      patch: (current: EvidenceProvisioningLedger) => Omit<EvidenceProvisioningLedger, "revisionSeq">
+    ) => {
+      // Each asynchronous Jira operation is fenced by an unexpired CAS lease.
+      if (ledger.ownerId !== ownerId || this.now() >= ledger.leaseUntilEpochMs) {
+        throw new ConcurrentModificationError("Provisioning lease expired; stop before another Jira operation.");
+      }
+      const next = patch(ledger);
+      ledger = await this.store.casProvisioningLedger!(
+        ledger.revisionSeq,
+        { ...next, ownerId, leaseUntilEpochMs: this.now() + leaseMs }
+      );
+    };
+
+    const changeSlot = async (slot: EvidenceProvisioningSlot) => {
+      await persist((current) => ({
+        ...current,
+        slots: { ...current.slots, [slot.evidenceId]: slot }
+      }));
+    };
+
+    const items: ProvisionedVerificationIssue[] = [];
+    try {
+      for (const spec of params.specs) {
+        let slot = ledger.slots[spec.evidenceId];
+        if (!slot) {
+          slot = {
+            evidenceId: spec.evidenceId,
+            operationId: randomUUID(),
+            stage: "CREATING"
+          };
+          // This checkpoint happens BEFORE a POST: an ambiguous POST outcome
+          // will never be retried as a fresh issue without human reconciliation.
+          await changeSlot(slot);
+        }
+        if (slot.stage === "CREATING" && slot.jiraIssueId) {
+          slot = { ...slot, stage: "CREATED" };
+        }
+        const initialSlot = slot;
+        const item = await this.jira.provisionVerificationIssueSlot({
+          projectKey: params.projectKey,
+          ecoIssueKey: params.ecoIssueKey,
+          ecoIssueId: params.ecoIssueId,
+          templateId: params.templateId,
+          spec,
+          operationId: initialSlot.operationId,
+          stage: initialSlot.stage,
+          existingIssueId: initialSlot.jiraIssueId,
+          existingIssueKey: initialSlot.jiraIssueKey,
+          callbacks: {
+            onCreated: async (issueId, issueKey) => {
+              await changeSlot({
+                ...initialSlot, stage: "CREATED", jiraIssueId: issueId, jiraIssueKey: issueKey
+              });
+            },
+            onDone: async () => {
+              const current = ledger.slots[spec.evidenceId]!;
+              await changeSlot({
+                ...current,
+                stage: current.stage === "LINKED" ? "LINKED" : "DONE"
+              });
+            },
+            onLinked: async () => {
+              const current = ledger.slots[spec.evidenceId]!;
+              await changeSlot({ ...current, stage: "LINKED" });
+            }
+          }
+        });
+        items.push(item);
+      }
+    } catch (err) {
+      // Keep all per-slot evidence checkpoints even on partial failures.
+      try {
+        await persist((current) => ({ ...current, status: "FAILED", leaseUntilEpochMs: 0 }));
+      } catch {
+        // Never conceal the original Jira error if a competing worker took over.
+      }
+      throw err;
+    }
+
+    return {
+      items,
+      finish: async () => {
+        await persist((current) => ({ ...current, status: "COMPLETE" }));
+      }
+    };
   }
 
   public async commitProposalOperations(params: {
