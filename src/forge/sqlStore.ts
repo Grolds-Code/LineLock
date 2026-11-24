@@ -9,6 +9,7 @@ import {
   ConcurrentModificationError,
   ProvisioningNotReadyError,
   type EvidenceProvisioningLedger,
+  type ProjectGovernanceConfig,
   type StoredEcoWorkspace,
   type VerificationStore
 } from "./ports";
@@ -272,6 +273,72 @@ export class ForgeSqlCasStore implements VerificationStore {
       );
     }
     return { ...ledger, revisionSeq: expectedRevisionSeq + 1 };
+  }
+
+  private projectGovernanceKey(projectKey: string): string {
+    const key = projectKey.trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9_]*$/.test(key) || key.length > 30) {
+      throw new RangeError("Invalid Jira project key for governed issue-type configuration.");
+    }
+    return `__linelock_project_config__:${key}`;
+  }
+
+  public async getProjectGovernanceConfig(projectKey: string): Promise<ProjectGovernanceConfig | null> {
+    const key = this.projectGovernanceKey(projectKey);
+    const res = await this.sqlClient
+      .prepare<EcoWorkspaceSqlRow>(
+        "SELECT eco_issue_id, revision_seq, approval_generation, updated_at_epoch_ms, payload_json FROM linelock_eco_workspaces WHERE eco_issue_id = ?"
+      )
+      .bindParams(key)
+      .execute();
+    const row = res.rows[0];
+    if (!row) return null;
+    const config = JSON.parse(row.payload_json) as Omit<ProjectGovernanceConfig, "revisionSeq">;
+    if (config.projectKey !== projectKey.trim().toUpperCase()) {
+      throw new Error("Stored governance project identity does not match its key.");
+    }
+    return { ...config, revisionSeq: parseBigIntNumber(row.revision_seq, "revision_seq") };
+  }
+
+  public async insertProjectGovernanceConfig(
+    config: Omit<ProjectGovernanceConfig, "revisionSeq">
+  ): Promise<ProjectGovernanceConfig> {
+    const key = this.projectGovernanceKey(config.projectKey);
+    try {
+      const res = await this.sqlClient
+        .prepare<UpdateQueryResponse>(
+          "INSERT INTO linelock_eco_workspaces (eco_issue_id, revision_seq, approval_generation, updated_at_epoch_ms, payload_json) VALUES (?, ?, ?, ?, ?)"
+        )
+        .bindParams(key, 1, 0, config.updatedAtEpochMs, JSON.stringify(config))
+        .execute();
+      if (res.rows.affectedRows !== 1) throw new ConcurrentModificationError("Governance config INSERT failed.");
+    } catch (err) {
+      if (isDuplicatePrimaryKeyError(err)) {
+        throw new ConcurrentModificationError("Governance config changed concurrently. Refresh and retry.");
+      }
+      throw err;
+    }
+    return { ...config, revisionSeq: 1 };
+  }
+
+  public async casProjectGovernanceConfig(
+    expectedRevisionSeq: number,
+    config: Omit<ProjectGovernanceConfig, "revisionSeq">
+  ): Promise<ProjectGovernanceConfig> {
+    const key = this.projectGovernanceKey(config.projectKey);
+    const res = await this.sqlClient
+      .prepare<UpdateQueryResponse>(
+        "UPDATE linelock_eco_workspaces SET revision_seq = ?, approval_generation = ?, updated_at_epoch_ms = ?, payload_json = ? WHERE eco_issue_id = ? AND revision_seq = ?"
+      )
+      .bindParams(
+        expectedRevisionSeq + 1, 0, config.updatedAtEpochMs,
+        JSON.stringify(config), key, expectedRevisionSeq
+      )
+      .execute();
+    if (res.rows.affectedRows !== 1) {
+      throw new ConcurrentModificationError("Governance issue-type config CAS failed. Refresh and retry.");
+    }
+    return { ...config, revisionSeq: expectedRevisionSeq + 1 };
   }
 
   public async registerEvidenceIssueIds(issueIds: readonly string[]): Promise<void> {
