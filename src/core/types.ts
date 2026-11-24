@@ -195,6 +195,9 @@ export type ChangeOperation =
 export interface LiveJiraIssueProjection {
   readonly issueId: string;
   readonly issueKey: string;
+  /** Jira's server-provided issue type identity, excluded from v1 evidence/snapshot hashes. */
+  readonly issueTypeId?: string;
+  readonly issueTypeName?: string;
   readonly summary: string;
   readonly description: string;
   readonly statusCategoryKey: "done" | "indeterminate" | "new" | string;
