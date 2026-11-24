@@ -273,6 +273,16 @@ describe("Phase 4: Multi-Industry Templates, Custom Authoring Studio, Live Jira 
     expect(adultFlow?.status).toBe("SUPPORTED_BY_APPROVED_RULE");
     expect(adultFlow?.appliedCarryForwardRuleId).toBe("CFR-MED-FLOW-ADULT");
 
+    await expect(service.simulateCounterfactual({
+      projectKey: "ECO",
+      ecoIssueId: "66402",
+      request: {
+        kind: "GATE_DRIVER_REV_B_CUTOVER",
+        targetVariants: "ALL",
+        serialFrom: 5000
+      }
+    })).rejects.toThrow(/Automotive EV operation/);
+
     // Scoping Flow Sensor Rev B strictly to VAR_ADULT_ICU eliminates physical retests!
     const scopedAdult = await service.applyScenarioPreset({
       projectKey: "ECO",
@@ -318,6 +328,16 @@ describe("Phase 4: Multi-Industry Templates, Custom Authoring Studio, Live Jira 
     });
     expect(simReg.delta.simulatedGateState).toBe("AWAITING_ATTESTATION");
     expect(simReg.delta.simulatedRequiredRetests).toBe(0);
+
+    await expect(service.simulateCounterfactual({
+      projectKey: "ECO",
+      ecoIssueId: "66403",
+      request: {
+        kind: "CAP_REV_D_DRAFT_CUTOVER",
+        targetVariants: "ALL",
+        serialFrom: 5000
+      }
+    })).rejects.toThrow(/no corresponding draft resolver revision/);
   });
 
   it("authors custom APPROVED vs DRAFT components and binds existing Done Jira evidence tickets via CAS + generation increment", async () => {
