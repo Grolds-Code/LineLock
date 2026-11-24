@@ -382,6 +382,49 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
     expect(refreshedImmediately.workspace?.finalizedReleaseReceipt?.receiptId).toMatch(/^receipt-/);
   });
 
+  it("keeps every Rovo GET read-only while Jira Done waits for durable receipt reconciliation", async () => {
+    const { service, jira, provisioning, store, rovo } = buildPhase3Rig();
+    await provisioning.runMigrations("install");
+
+    const seeded = await service.provisionLiveJiraWorkspace({
+      projectKey: "ECO", ecoIssueId: "66400", ecoIssueKey: "ECO-1",
+      callerAccountId: "acct-group-admin-lead"
+    });
+    const demo = await service.switchGovernancePolicyMode({
+      projectKey: "ECO", ecoIssueId: "66400",
+      expectedRevisionSeq: seeded.workspace!.revisionSeq,
+      callerAccountId: "acct-group-admin-lead", mode: "DEMO_SOLO_ADMIN"
+    });
+    await service.recordHumanAttestation({
+      projectKey: "ECO", ecoIssueId: "66400",
+      expectedRevisionSeq: demo.workspace!.revisionSeq,
+      expectedSnapshotSha256: demo.evaluation!.snapshotSha256,
+      expectedApprovalGeneration: demo.workspace!.eco.approvalGeneration,
+      signerAccountId: "acct-group-admin-lead", roleName: "Administrators",
+      rationale: "Authorised evaluation fixture"
+    });
+    const validation = await service.validateReleaseTransition({
+      projectKey: "ECO", ecoIssueId: "66400", actorAccountId: "acct-group-admin-lead"
+    });
+    expect(validation.result).toBe(true);
+    jira.setIssueStatus("66400", "done");
+
+    const before = await store.getEcoWorkspace("66400");
+    expect(before?.pendingTransitionIntent).not.toBeNull();
+    expect(before?.finalizedReleaseReceipt).toBeNull();
+
+    const inspected = await rovo.inspectEcoAssurance({ issueKey: "ECO-1" });
+    expect(inspected.reconciliationStatus).toBe("PENDING_RELEASE_RECONCILIATION");
+    await rovo.compareBaselines({ issueKey: "ECO-1" });
+    await rovo.simulateSerialCutover({ issueKey: "ECO-1", variantScope: "VAR_400V" });
+    await rovo.inspectProjectFleet({ projectKey: "ECO" });
+
+    const after = await store.getEcoWorkspace("66400");
+    expect(after?.revisionSeq).toBe(before?.revisionSeq);
+    expect(after?.pendingTransitionIntent).toEqual(before?.pendingTransitionIntent);
+    expect(after?.finalizedReleaseReceipt).toBeNull();
+  });
+
   it("evaluates parametric lot-bounded [SN 3500..7000) 3-way splits, DRAFT component structural blocks, and uncovered governed-slot substitutions", async () => {
     const { service, provisioning, rovo } = buildPhase3Rig();
     await provisioning.runMigrations("install");
