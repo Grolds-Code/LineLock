@@ -182,6 +182,24 @@ describe("Durable Jira evidence provisioning, live-issue identity and crash reco
     expect(jira.createCount).toBe(6);
   });
 
+  it("upgrades a pristine offline reference workspace into six real Jira qualification tickets", async () => {
+    const { service, jira, request } = await makeRig();
+    const seed = await service.seedReferenceWorkspace({
+      ecoIssueId: request.ecoIssueId,
+      ecoIssueKey: request.ecoIssueKey,
+      callerAccountId: request.callerAccountId,
+      templateId: "AUTOMOTIVE_EV_HELIOS"
+    });
+    expect(seed.revisionSeq).toBe(1);
+    const upgraded = await service.provisionLiveJiraWorkspace(request);
+    expect(upgraded.workspace?.revisionSeq).toBe(2);
+    expect(upgraded.evidenceIntegrity).toHaveLength(6);
+    expect(upgraded.evidenceIntegrity?.every((row) => row.hashMatches)).toBe(true);
+    expect(jira.createCount).toBe(6);
+    await service.provisionLiveJiraWorkspace(request);
+    expect(jira.createCount).toBe(6);
+  });
+
   it("resumes an interrupted slot from its durable Jira identity without duplicating it", async () => {
     const { store, jira, service, request } = await makeRig();
     jira.crashMode = "afterCheckpointOnce";
