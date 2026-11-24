@@ -65,6 +65,23 @@ class RecoveryGateway implements JiraPlatformGateway {
     return Object.fromEntries(requiredRoles.map((role) => [role, roles[role] ?? []]));
   }
 
+  async verifyProvisioningIssueProvenance(params: {
+    readonly issueKeyOrId: string;
+    readonly ecoIssueId: string;
+    readonly ecoIssueKey: string;
+    readonly projectKey: string;
+    readonly templateId: IndustryTemplateId;
+    readonly evidenceId: string;
+    readonly operationId: string;
+  }): Promise<{ readonly jiraIssueId: string; readonly jiraIssueKey: string }> {
+    const issue = await this.fetchLiveIssueByKeyOrId(params.issueKeyOrId);
+    if (issue.projectKey !== params.projectKey ||
+        this.provenance.get(issue.issueId) !== params.operationId) {
+      throw new Error("Failed immutable Jira provisioning provenance.");
+    }
+    return { jiraIssueId: issue.issueId, jiraIssueKey: issue.issueKey };
+  }
+
   async provisionVerificationIssues(): Promise<readonly ProvisionedVerificationIssue[]> {
     throw new Error("The production slot gateway must not use legacy six-ticket bulk creation.");
   }
@@ -186,6 +203,26 @@ describe("Durable Jira evidence provisioning, live-issue identity and crash reco
       /do not run another create request/
     );
     expect(jira.createCount).toBe(1);
+  });
+
+  it("recovers an ambiguous Jira-created issue only after verifying the original operation identity", async () => {
+    const { store, jira, service, request } = await makeRig();
+    jira.crashMode = "beforeCheckpointOnce";
+    await expect(service.provisionLiveJiraWorkspace(request)).rejects.toThrow(/lost response/);
+    const unresolved = await store.getProvisioningLedger("66400");
+    const slot = Object.values(unresolved!.slots)[0]!;
+    await expect(service.reconcileUncertainProvisioningSlot({
+      ecoIssueId: "66400", projectKey: "ECO",
+      evidenceId: slot.evidenceId, issueKeyOrId: "ECO-1"
+    })).rejects.toThrow(/Failed immutable Jira provisioning provenance/);
+    const recovered = await service.reconcileUncertainProvisioningSlot({
+      ecoIssueId: "66400", projectKey: "ECO",
+      evidenceId: slot.evidenceId, issueKeyOrId: "ECO-100"
+    });
+    expect(recovered.slots[slot.evidenceId]?.stage).toBe("CREATED");
+    const complete = await service.provisionLiveJiraWorkspace(request);
+    expect(complete.evidenceIntegrity).toHaveLength(6);
+    expect(jira.createCount).toBe(6);
   });
 
   it("rejects concurrent provisioning without duplicate ticket creation", async () => {
