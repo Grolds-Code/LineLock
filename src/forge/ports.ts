@@ -315,7 +315,12 @@ export interface ProjectFleetOverview {
   readonly projectKey: string;
   readonly provisioning: ProvisioningStatusReport;
   readonly evaluatedAtEpochMs: number;
+  /** Counts on this visible, bounded page only, never a secret project-wide total. */
   readonly totalEcos: number;
+  readonly evaluatedCount?: number;
+  readonly hasMore?: boolean;
+  readonly nextCursor?: string | null;
+  readonly isPartialPage?: boolean;
   readonly verifiedReleasedCount: number;
   readonly readyCount: number;
   readonly awaitingSignoffCount: number;
