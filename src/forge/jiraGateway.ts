@@ -195,10 +195,17 @@ function buildAuditCommentAdf(markdownText: string): Record<string, unknown> {
  * Forge's runtime proxy returns `UNAVAILABLE_TOKEN_ERROR` on contextless `asApp()`.
  */
 export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
+  constructor(private readonly accessMode: "app" | "user" = "app") {}
+
   private async requestJiraResilient(
     path: ReturnType<typeof route>,
     init?: ForgeRequestInit
   ): Promise<ForgeResponse> {
+    // Rovo's entire live Jira read call graph runs under the principal.
+    // Never fall back from asUser to asApp on missing consent or token errors.
+    if (this.accessMode === "user") {
+      return api.asUser().requestJira(path, init);
+    }
     let primaryErr: unknown;
 
     for (let attempt = 0; attempt < 2; attempt++) {
