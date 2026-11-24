@@ -23,6 +23,7 @@ modules:
       name: LineLock Effectivity-Aware Evidence Gate
       description: Blocks ECO release transitions unless all effective serial slices, operating envelopes, and generation-bound role attestations are verified.
       function: workflow-validator-fn
+      projectTypes: [company-managed, team-managed]
 
   rovo:agent:
     - key: ll-assurance-agent
