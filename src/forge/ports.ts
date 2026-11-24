@@ -75,6 +75,14 @@ export interface CreateEvidenceSlotCallbacks {
   readonly onLinked: () => Promise<void>;
 }
 
+export interface ProjectGovernanceConfig {
+  readonly projectKey: string;
+  readonly governedIssueTypeIds: readonly string[];
+  readonly updatedByAccountId: string;
+  readonly updatedAtEpochMs: number;
+  readonly revisionSeq: number;
+}
+
 export interface VerificationStore {
   getEcoWorkspace(ecoIssueId: string): Promise<StoredEcoWorkspace | null>;
   listEcoWorkspaces?(): Promise<readonly StoredEcoWorkspace[]>;
@@ -95,6 +103,14 @@ export interface VerificationStore {
     expectedRevisionSeq: number,
     ledger: Omit<EvidenceProvisioningLedger, "revisionSeq">
   ): Promise<EvidenceProvisioningLedger>;
+  getProjectGovernanceConfig?(projectKey: string): Promise<ProjectGovernanceConfig | null>;
+  insertProjectGovernanceConfig?(
+    config: Omit<ProjectGovernanceConfig, "revisionSeq">
+  ): Promise<ProjectGovernanceConfig>;
+  casProjectGovernanceConfig?(
+    expectedRevisionSeq: number,
+    config: Omit<ProjectGovernanceConfig, "revisionSeq">
+  ): Promise<ProjectGovernanceConfig>;
 }
 
 export interface ConnectivityProbeResult {
