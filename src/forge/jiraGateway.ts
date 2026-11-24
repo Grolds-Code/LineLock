@@ -61,6 +61,7 @@ interface JiraIssueRestResponse {
     readonly updated?: string;
     readonly project?: {
       readonly key?: string;
+      readonly id?: string;
     };
     readonly status?: {
       readonly statusCategory?: {
@@ -284,6 +285,7 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       issueId: String(body.id),
       issueKey: body.key,
       projectKey,
+      projectId: body.fields.project?.id,
       issueTypeId: body.fields.issuetype?.id,
       issueTypeName: body.fields.issuetype?.name,
       summary: body.fields.summary ?? "",
