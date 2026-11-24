@@ -131,6 +131,15 @@ export interface JiraPlatformGateway {
     candidateAccountIds?: readonly string[]
   ): Promise<Record<string, readonly string[]>>;
   /** Per-slot recoverable provisioning. Older test adapters may implement bulk only. */
+  verifyProvisioningIssueProvenance?(params: {
+    readonly issueKeyOrId: string;
+    readonly ecoIssueId: string;
+    readonly ecoIssueKey: string;
+    readonly projectKey: string;
+    readonly templateId: IndustryTemplateId;
+    readonly evidenceId: string;
+    readonly operationId: string;
+  }): Promise<{ readonly jiraIssueId: string; readonly jiraIssueKey: string }>;
   provisionVerificationIssueSlot?(params: {
     readonly projectKey: string;
     readonly ecoIssueKey: string;
