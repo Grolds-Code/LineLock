@@ -1497,6 +1497,38 @@ export class LineLockService {
     };
   }
 
+  public async configureProjectGovernance(params: {
+    readonly projectKey: string;
+    readonly callerAccountId: string;
+    readonly governedIssueTypeIds: readonly string[];
+  }): Promise<import("./ports").ProjectGovernanceConfig> {
+    await this.ensureProvisionedOrThrow();
+    if (!this.store.getProjectGovernanceConfig ||
+        !this.store.insertProjectGovernanceConfig ||
+        !this.store.casProjectGovernanceConfig) {
+      throw new Error("Governance issue-type configuration is not supported by the active store.");
+    }
+    const projectKey = params.projectKey.trim().toUpperCase();
+    const issueTypeIds = [...new Set(params.governedIssueTypeIds.map((id) => id.trim()))].sort();
+    if (!/^[A-Z][A-Z0-9_]*$/.test(projectKey) ||
+        !params.callerAccountId ||
+        issueTypeIds.length === 0 ||
+        issueTypeIds.length > 20 ||
+        issueTypeIds.some((id) => !/^\d{1,20}$/.test(id))) {
+      throw new Error("Choose 1–20 valid Jira issue-type IDs and a verified administrator identity.");
+    }
+    const existing = await this.store.getProjectGovernanceConfig(projectKey);
+    const next = {
+      projectKey,
+      governedIssueTypeIds: issueTypeIds,
+      updatedByAccountId: params.callerAccountId,
+      updatedAtEpochMs: this.now()
+    };
+    return existing
+      ? this.store.casProjectGovernanceConfig(existing.revisionSeq, next)
+      : this.store.insertProjectGovernanceConfig(next);
+  }
+
   public async validateReleaseTransition(params: {
     readonly projectKey: string;
     readonly ecoIssueId: string;
@@ -1520,19 +1552,38 @@ export class LineLockService {
         // Only actual Jira issue types determine whether an uninitialized work
         // item belongs to the configured ECO class. Unknown type fails closed.
         const liveIssue = await this.jira.fetchLiveIssue(params.ecoIssueId);
-        const issueType = liveIssue.issueTypeName?.trim().toLowerCase();
-        if (
-          issueType &&
-          issueType !== "engineering change order" &&
-          issueType !== "engineering change" &&
-          issueType !== "eco" &&
-          issueType !== "change"
-        ) {
-          return { result: true };
+        const config = this.store.getProjectGovernanceConfig
+          ? await this.store.getProjectGovernanceConfig(params.projectKey)
+          : null;
+        if (config) {
+          // Project administrators pin stable Jira issue-type IDs. A missing ID
+          // cannot be interpreted as unrelated and therefore fails closed.
+          if (!liveIssue.issueTypeId) {
+            return {
+              result: false,
+              errorMessage: "LineLock block: Jira did not return issue-type ID for governed-scope verification."
+            };
+          }
+          if (!config.governedIssueTypeIds.includes(liveIssue.issueTypeId)) {
+            return { result: true };
+          }
+        } else {
+          // Compatibility fallback only. Production setups must configure
+          // immutable type IDs in the LineLock Fleet project administration.
+          const issueType = liveIssue.issueTypeName?.trim().toLowerCase();
+          if (
+            issueType &&
+            issueType !== "engineering change order" &&
+            issueType !== "engineering change" &&
+            issueType !== "eco" &&
+            issueType !== "change"
+          ) {
+            return { result: true };
+          }
         }
         return {
           result: false,
-          errorMessage: `LineLock block: No initialized engineering verification workspace for ECO issue ${params.ecoIssueId}.`
+          errorMessage: `LineLock block: No initialized engineering verification workspace for governed issue ${params.ecoIssueId}.`
         };
       }
 
