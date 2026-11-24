@@ -36,6 +36,7 @@ class RecoveryGateway implements JiraPlatformGateway {
   constructor() {
     this.issues.set("66400", {
       issueId: "66400", issueKey: "ECO-1", projectKey: "ECO",
+      issueTypeId: "10200",
       issueTypeName: "Engineering Change Order",
       summary: "Qualification-gated capacitor engineering change",
       description: "Controlled ECO", statusCategoryKey: "new",
@@ -110,7 +111,7 @@ class RecoveryGateway implements JiraPlatformGateway {
       this.provenance.set(id, params.operationId);
       this.issues.set(id, {
         issueId: id, issueKey: key, projectKey: params.projectKey,
-        issueTypeName: "Task", summary: params.spec.summary,
+        issueTypeId: "10000", issueTypeName: "Task", summary: params.spec.summary,
         description: params.spec.description, statusCategoryKey: "new",
         resolutionName: null, updatedAtEpochMs: HELIOS_BASE_EPOCH_MS + this.createCount,
         structuredFields: {}
@@ -223,6 +224,38 @@ describe("Durable Jira evidence provisioning, live-issue identity and crash reco
     const complete = await service.provisionLiveJiraWorkspace(request);
     expect(complete.evidenceIntegrity).toHaveLength(6);
     expect(jira.createCount).toBe(6);
+  });
+
+  it("uses admin-configured immutable Jira issue-type IDs and excludes config rows from Fleet", async () => {
+    const { store, jira, service } = await makeRig();
+    const config = await service.configureProjectGovernance({
+      projectKey: "ECO",
+      callerAccountId: "acct-admin",
+      governedIssueTypeIds: ["10200"]
+    });
+    expect(config.revisionSeq).toBe(1);
+    expect((await store.getProjectGovernanceConfig("ECO"))?.governedIssueTypeIds).toEqual(["10200"]);
+    jira.issues.set("99001", {
+      issueId: "99001", issueKey: "ECO-55", projectKey: "ECO",
+      issueTypeId: "10200", issueTypeName: "Task", // mutable display name is not trusted
+      summary: "Uninitialized governed issue", description: "",
+      statusCategoryKey: "new", resolutionName: null,
+      updatedAtEpochMs: HELIOS_BASE_EPOCH_MS, structuredFields: {}
+    });
+    jira.issues.set("99002", {
+      issueId: "99002", issueKey: "ECO-56", projectKey: "ECO",
+      issueTypeId: "10000", issueTypeName: "Engineering Change Order",
+      summary: "Unrelated task with misleading name", description: "",
+      statusCategoryKey: "new", resolutionName: null,
+      updatedAtEpochMs: HELIOS_BASE_EPOCH_MS, structuredFields: {}
+    });
+    expect((await service.validateReleaseTransition({
+      projectKey: "ECO", ecoIssueId: "99001", actorAccountId: "acct-admin"
+    })).result).toBe(false);
+    expect((await service.validateReleaseTransition({
+      projectKey: "ECO", ecoIssueId: "99002", actorAccountId: "acct-admin"
+    })).result).toBe(true);
+    expect(await store.listEcoWorkspaces()).toHaveLength(0);
   });
 
   it("rejects concurrent provisioning without duplicate ticket creation", async () => {
