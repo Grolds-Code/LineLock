@@ -194,6 +194,49 @@ function buildPhase4Harness() {
 }
 
 describe("Phase 4: Multi-Industry Templates, Custom Authoring Studio, Live Jira Binding & Space-Wide Fleet Portfolio", () => {
+  it("ignores stale global evidence registry grants for an uninitialized ECO and allows ordinary Tasks", async () => {
+    const { service, store, jira, provisioning } = buildPhase4Harness();
+    await provisioning.runMigrations("install");
+    const live = {
+      projectKey: "ECO",
+      description: "Attempted evidence-registration bypass",
+      statusCategoryKey: "new",
+      resolutionName: null,
+      updatedAtEpochMs: HELIOS_BASE_EPOCH_MS,
+      structuredFields: {}
+    } as const;
+    jira.issuesById.set("99700", {
+      ...live,
+      issueId: "99700",
+      issueKey: "ECO-99",
+      issueTypeName: "Engineering Change Order",
+      summary: "Uninitialized governed ECO"
+    });
+    jira.issuesById.set("99701", {
+      ...live,
+      issueId: "99701",
+      issueKey: "ECO-100",
+      issueTypeName: "Task",
+      summary: "Unrelated Jira work item"
+    });
+
+    // Legacy installations can contain stale globally registered IDs.
+    await store.registerEvidenceIssueIds(["99700"]);
+    const governed = await service.validateReleaseTransition({
+      projectKey: "ECO", ecoIssueId: "99700", actorAccountId: "acct-author"
+    });
+    expect(governed.result).toBe(false);
+    expect(governed.errorMessage).toContain("No initialized");
+
+    const ordinaryTask = await service.validateReleaseTransition({
+      projectKey: "ECO", ecoIssueId: "99701", actorAccountId: "acct-author"
+    });
+    expect(ordinaryTask.result).toBe(true);
+    await expect(service.getProjectFleetOverview({ projectKey: "*" })).rejects.toThrow(
+      "valid, explicit Jira project key"
+    );
+  });
+
   it("provisions MedTech Class III IEC 60601 Infusion Pump and verifies Adult ICU carry-forward vs Neonatal NICU Strong Kleene K3 FALSE block", async () => {
     const { service } = buildPhase4Harness();
 
