@@ -497,6 +497,19 @@ export class LineLockService {
   }): Promise<EcoWorkspaceView> {
     await this.ensureProvisionedOrThrow();
 
+    // A viewer must never be able to weaken separation of duties or invalidate signoffs.
+    // Resolve group-backed membership for the invoking user against live Jira project roles.
+    const roleMembers = await this.jira.fetchProjectRoleMembers(
+      params.projectKey,
+      ["Administrators"],
+      [params.callerAccountId]
+    );
+    if (!roleMembers["Administrators"]?.includes(params.callerAccountId)) {
+      throw new AuthorizationError(
+        "Changing governance policy requires membership in the Jira project's Administrators role."
+      );
+    }
+
     const ws = await this.mustLoadWorkspace(params.ecoIssueId);
     if (ws.revisionSeq !== params.expectedRevisionSeq) {
       throw new ConcurrentModificationError(
@@ -534,7 +547,11 @@ export class LineLockService {
             policyId: prodPolicyId,
             policyVersion: nextPolicyVersion,
             requiredAttestationRoles: ["Lead Engineers", "Quality Approvers"],
-            carryForwardDispositionRole: "Power Electronics Disposition Authority",
+            carryForwardDispositionRole: isMedTech
+              ? "Clinical Risk Disposition Authority"
+              : isAero
+                ? "Airworthiness Disposition Authority"
+                : "Power Electronics Disposition Authority",
             enforceSeparationOfDuties: true,
             allowRuleBasedCarryForward: true
           };
