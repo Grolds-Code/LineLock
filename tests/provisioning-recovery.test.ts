@@ -37,6 +37,7 @@ class RecoveryGateway implements JiraPlatformGateway {
     this.issues.set("66400", {
       issueId: "66400", issueKey: "ECO-1", projectKey: "ECO",
       issueTypeId: "10200",
+      projectId: "10010",
       issueTypeName: "Engineering Change Order",
       summary: "Qualification-gated capacitor engineering change",
       description: "Controlled ECO", statusCategoryKey: "new",
@@ -256,6 +257,26 @@ describe("Durable Jira evidence provisioning, live-issue identity and crash reco
       projectKey: "ECO", ecoIssueId: "99002", actorAccountId: "acct-admin"
     })).result).toBe(true);
     expect(await store.listEcoWorkspaces()).toHaveLength(0);
+  });
+
+  it("fails closed if a governed ECO is moved to a different Jira project", async () => {
+    const { service, jira, request } = await makeRig();
+    const initial = await service.provisionLiveJiraWorkspace(request);
+    expect(initial.workspace?.eco.projectKey).toBe("ECO");
+    expect(initial.workspace?.eco.projectId).toBe("10010");
+    const issue = jira.issues.get("66400")!;
+    jira.issues.set("66400", {
+      ...issue, projectKey: "OTHER", projectId: "20099", issueKey: "OTHER-1"
+    });
+    const moved = await service.validateReleaseTransition({
+      projectKey: "OTHER", ecoIssueId: "66400", actorAccountId: "acct-admin"
+    });
+    expect(moved.result).toBe(false);
+    expect(moved.errorMessage).toContain("project identity changed");
+    const stale = await service.validateReleaseTransition({
+      projectKey: "ECO", ecoIssueId: "66400", actorAccountId: "acct-admin"
+    });
+    expect(stale.result).toBe(false);
   });
 
   it("rejects concurrent provisioning without duplicate ticket creation", async () => {
