@@ -218,6 +218,43 @@ function buildPhase3Rig() {
 }
 
 describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt Promotion, Parametric Lot Splitting & Live Re-Pinning", () => {
+  it("preserves the correct industry disposition authority when restoring production governance", async () => {
+    const cases = [
+      ["AUTOMOTIVE_EV_HELIOS", "Power Electronics Disposition Authority"],
+      ["MEDTECH_INFUSION_PUMP", "Clinical Risk Disposition Authority"],
+      ["AEROSPACE_FLIGHT_ACTUATOR", "Airworthiness Disposition Authority"]
+    ] as const;
+
+    for (const [templateId, expectedRole] of cases) {
+      const { service, provisioning } = buildPhase3Rig();
+      await provisioning.runMigrations("install");
+      const seeded = await service.seedReferenceWorkspace({
+        ecoIssueId: "66400",
+        ecoIssueKey: "ECO-1",
+        callerAccountId: "acct-group-admin-lead",
+        templateId
+      });
+      const demo = await service.switchGovernancePolicyMode({
+        projectKey: "ECO",
+        ecoIssueId: "66400",
+        expectedRevisionSeq: seeded.revisionSeq,
+        callerAccountId: "acct-group-admin-lead",
+        mode: "DEMO_SOLO_ADMIN"
+      });
+      expect(demo.workspace?.catalog.policy.carryForwardDispositionRole).toBe("Administrators");
+
+      const restored = await service.switchGovernancePolicyMode({
+        projectKey: "ECO",
+        ecoIssueId: "66400",
+        expectedRevisionSeq: demo.workspace!.revisionSeq,
+        callerAccountId: "acct-group-admin-lead",
+        mode: "PRODUCTION_MULTI_ROLE"
+      });
+      expect(restored.workspace?.catalog.policy.carryForwardDispositionRole).toBe(expectedRole);
+      expect(restored.workspace?.catalog.policy.enforceSeparationOfDuties).toBe(true);
+    }
+  });
+
   it("resolves Jira group-role actors for signing, blocks unprivileged users, and revokes trust live if group membership is removed before Done", async () => {
     const { service, jira, provisioning } = buildPhase3Rig();
     await provisioning.runMigrations("install");
@@ -229,6 +266,19 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
       callerAccountId: "acct-group-admin-lead"
     });
     expect(seeded.evaluation?.gateState).toBe("AWAITING_ATTESTATION");
+
+    await expect(
+      service.switchGovernancePolicyMode({
+        projectKey: "ECO",
+        ecoIssueId: "66400",
+        expectedRevisionSeq: seeded.workspace!.revisionSeq,
+        callerAccountId: "acct-unprivileged-dev",
+        mode: "DEMO_SOLO_ADMIN"
+      })
+    ).rejects.toBeInstanceOf(AuthorizationError);
+    expect((await store.getEcoWorkspace("66400"))?.revisionSeq).toBe(
+      seeded.workspace!.revisionSeq
+    );
 
     const soloView = await service.switchGovernancePolicyMode({
       projectKey: "ECO",
