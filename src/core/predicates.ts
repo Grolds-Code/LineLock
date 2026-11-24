@@ -26,8 +26,10 @@ type ResolvedTerm<T> =
   | { readonly ok: false; readonly reason: string };
 
 function pow10BigInt(exp: number): bigint {
-  if (exp < 0 || !Number.isSafeInteger(exp)) {
-    throw new RangeError(`Exponent for pow10BigInt must be a non-negative safe integer, got ${exp}`);
+  // Every supported quantity scale is in [-18, 18]; a difference >36
+  // indicates malformed external/persisted data and must never allocate 10^N.
+  if (exp < 0 || exp > 36 || !Number.isSafeInteger(exp)) {
+    throw new RangeError(`Exact decimal exponent must be an integer in [0, 36], got ${exp}`);
   }
   return 10n ** BigInt(exp);
 }
@@ -56,6 +58,10 @@ export function compareExactQuantities(
   a: ExactQuantity,
   b: ExactQuantity
 ): { readonly comparable: true; readonly cmp: -1 | 0 | 1 } | { readonly comparable: false; readonly reason: string } {
+  if (!Number.isSafeInteger(a.scale) || !Number.isSafeInteger(b.scale) ||
+      Math.abs(a.scale) > 18 || Math.abs(b.scale) > 18) {
+    throw new RangeError("Exact quantity scale is outside the supported [-18, 18] range.");
+  }
   if (a.unit !== b.unit) {
     return {
       comparable: false,
