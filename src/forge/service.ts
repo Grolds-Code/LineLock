@@ -334,7 +334,8 @@ export class LineLockService {
         ...ev,
         jiraIssueId: liveIssue.issueId,
         jiraIssueKey: liveIssue.issueKey,
-        pinnedIssueStateHash: computePinnedIssueStateHash(liveIssue)
+        pinnedIssueStateHash: computePinnedIssueStateHash(liveIssue, 2),
+        hashProjectionVersion: 2 as const
       };
     });
 
@@ -1009,7 +1010,8 @@ export class LineLockService {
       return {
         ...ev,
         jiraIssueKey: live.issueKey,
-        pinnedIssueStateHash: computePinnedIssueStateHash(live)
+        pinnedIssueStateHash: computePinnedIssueStateHash(live, 2),
+        hashProjectionVersion: 2 as const
       };
     });
 
@@ -1253,14 +1255,15 @@ export class LineLockService {
       );
     }
 
-    const pinnedHash = computePinnedIssueStateHash(targetIssue);
+    const pinnedHash = computePinnedIssueStateHash(targetIssue, 2);
     const updatedEvidence = ws.catalog.evidenceRecords.map((ev) =>
       ev.evidenceId === targetEvId
         ? {
             ...ev,
             jiraIssueId: targetIssue.issueId,
             jiraIssueKey: targetIssue.issueKey,
-            pinnedIssueStateHash: pinnedHash
+            pinnedIssueStateHash: pinnedHash,
+            hashProjectionVersion: 2 as const
           }
         : ev
     );
@@ -2266,7 +2269,7 @@ export class LineLockService {
     const oblCodeById = new Map(ws.catalog.obligations.map((o) => [o.obligationId, o.code]));
     const evidenceIntegrity: LiveEvidenceIntegrityRow[] = ws.catalog.evidenceRecords.map((ev) => {
       const live = liveIssuesById[ev.jiraIssueId];
-      const liveHash = live ? computePinnedIssueStateHash(live) : null;
+      const liveHash = live ? computePinnedIssueStateHash(live, ev.hashProjectionVersion ?? 1) : null;
       const statusIsDone = Boolean(live && live.statusCategoryKey.toLowerCase() === "done");
       return {
         evidenceId: ev.evidenceId,
