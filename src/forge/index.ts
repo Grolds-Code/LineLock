@@ -126,6 +126,9 @@ async function authorizedWorkspaceView(params: {
   readonly callerAccountId?: string;
 }) {
   await assertUserCanReadIssue(params.ecoIssueId);
+  // Complete authorization must happen BEFORE getWorkspaceView can reconcile
+  // a pending release receipt or read restricted evidence under app privileges.
+  await assertExistingWorkspaceVisible(params.ecoIssueId);
   const view = await defaultLineLockService.getWorkspaceView(params);
   if (view.workspace) await assertWorkspaceVisible(view.workspace);
   return view;
