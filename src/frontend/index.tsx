@@ -53,6 +53,14 @@ import {
   type IndustryTemplateId
 } from "../scenarios/templateMetadata";
 
+/** Preserve legitimate zero inputs and reject partial integer parses. */
+function safeIntegerOrDefault(raw: string, fallback: number): number {
+  const normalized = raw.trim();
+  if (!normalized) return fallback;
+  const value = Number(normalized);
+  return Number.isSafeInteger(value) ? value : fallback;
+}
+
 function unwrapInvoke<T>(raw: T | { readonly body: T }): T {
   if (raw && typeof raw === "object" && "body" in raw) {
     return (raw as { readonly body: T }).body;
@@ -478,8 +486,8 @@ const LineLockAssuranceCockpit: React.FC = () => {
           ? {
               kind: "AMBIENT_ENVELOPE_SHIFT",
               variantId: cfVariantScope === "ALL" ? fallbackVariant : cfVariantScope,
-              minAmbientC: Number.parseInt(cfMinAmbient, 10) || -20,
-              maxAmbientC: Number.parseInt(cfMaxAmbient, 10) || 58
+              minAmbientC: safeIntegerOrDefault(cfMinAmbient, -20),
+              maxAmbientC: safeIntegerOrDefault(cfMaxAmbient, 58)
             }
           : {
               kind: cfKind,
@@ -532,8 +540,8 @@ const LineLockAssuranceCockpit: React.FC = () => {
         specStatus: customSpecStatus,
         targetSlotPath: customSlotPath,
         primaryNumericAttrKey: customAttrKey,
-        primaryNumericValue: Number.parseInt(customAttrValue, 10) || 0,
-        primaryNumericScale: Number.parseInt(customAttrScale, 10) || 0,
+        primaryNumericValue: safeIntegerOrDefault(customAttrValue, 0),
+        primaryNumericScale: safeIntegerOrDefault(customAttrScale, 0),
         primaryNumericUnit: customAttrUnit,
         secondaryEnumAttrKey: customEnumKey.trim() || undefined,
         secondaryEnumValue: customEnumValue.trim() || undefined,
