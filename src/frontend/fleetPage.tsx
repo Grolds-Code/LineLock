@@ -118,11 +118,13 @@ const LineLockFleetAssurancePage: React.FC = () => {
   } | null>(null);
   const [selectedGovernedType, setSelectedGovernedType] = useState<string>("");
 
-  const loadFleet = async (): Promise<void> => {
+  const loadFleet = async (cursor?: string): Promise<void> => {
     setBusyAction("refresh");
     setErrorMsg(null);
     try {
-      const res = unwrapInvoke(await invoke<ProjectFleetOverview>("getProjectFleetOverview"));
+      const res = unwrapInvoke(await invoke<ProjectFleetOverview>(
+        "getProjectFleetOverview", { cursor }
+      ));
       setOverview(res);
       try {
         const setup = unwrapInvoke(await invoke<{
@@ -266,6 +268,22 @@ const LineLockFleetAssurancePage: React.FC = () => {
             >
               Refresh Live Fleet State
             </LoadingButton>
+            {overview?.isPartialPage ? (
+              <LoadingButton
+                onClick={() => void loadFleet()}
+                isLoading={busyAction === "refresh"}
+              >
+                First Page
+              </LoadingButton>
+            ) : null}
+            {overview?.hasMore && overview.nextCursor ? (
+              <LoadingButton
+                onClick={() => void loadFleet(overview.nextCursor!)}
+                isLoading={busyAction === "refresh"}
+              >
+                Next 25 Visible ECOs
+              </LoadingButton>
+            ) : null}
           </Inline>
 
           <Inline space="space.100" alignBlock="center" shouldWrap>
@@ -357,7 +375,7 @@ const LineLockFleetAssurancePage: React.FC = () => {
         <Inline space="space.150" shouldWrap>
           <Box xcss={metricCardStyle}>
             <Stack space="space.050">
-              <Text>Tracked ECO Workspaces</Text>
+              <Text>Visible ECOs (this page)</Text>
               <Heading size="medium">{String(overview.totalEcos)}</Heading>
             </Stack>
           </Box>
@@ -388,6 +406,16 @@ const LineLockFleetAssurancePage: React.FC = () => {
             </Stack>
           </Box>
         </Inline>
+      ) : null}
+
+      {overview?.isPartialPage ? (
+        <SectionMessage appearance="information" title="Visible Fleet page">
+          <Text>
+            These counts reflect only this page of accessible engineering changes.
+            Restricted Jira issues do not contribute to rows or aggregates.
+            Use Next Page or First Page to navigate.
+          </Text>
+        </SectionMessage>
       ) : null}
 
       {/* Empty-State Guidance */}
