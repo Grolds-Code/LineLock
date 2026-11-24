@@ -205,7 +205,7 @@ export class LineLockService {
       return existing;
     }
 
-    const liveEco = await this.jira.fetchLiveIssue(params.ecoIssueId);
+    const liveEco = await this.jira.fetchLiveIssueByKeyOrId(params.ecoIssueId);
     const defaultEco = createHeliosDefaultEco();
     const catalog =
       params.catalog ??
@@ -215,6 +215,8 @@ export class LineLockService {
       ...defaultEco,
       ecoJiraIssueId: params.ecoIssueId,
       ecoJiraKey: params.ecoIssueKey || liveEco.issueKey,
+      projectKey: liveEco.projectKey,
+      projectId: liveEco.projectId,
       ecoCreatedAtEpochMs: this.now(),
       authorAccountId: params.callerAccountId,
       lastEditorAccountId: params.callerAccountId,
@@ -250,7 +252,10 @@ export class LineLockService {
   }): Promise<EcoWorkspaceView> {
     await this.ensureProvisionedOrThrow();
 
-    const liveEco = await this.jira.fetchLiveIssue(params.ecoIssueId);
+    const liveEco = await this.jira.fetchLiveIssueByKeyOrId(params.ecoIssueId);
+    if (liveEco.projectKey !== params.projectKey) {
+      throw new Error("Cannot provision ECO evidence in a different Jira project.");
+    }
     const resolvedEcoKey = params.ecoIssueKey || liveEco.issueKey;
 
     const { referenceIssues, catalog: templateCatalog } = instantiateIndustryTemplate(
@@ -357,6 +362,8 @@ export class LineLockService {
           ...defaultEco,
           ecoJiraIssueId: params.ecoIssueId,
           ecoJiraKey: resolvedEcoKey,
+          projectKey: params.projectKey,
+          projectId: liveEco.projectId,
           ecoCreatedAtEpochMs: nowMs,
           authorAccountId: params.callerAccountId,
           lastEditorAccountId: params.callerAccountId,
@@ -377,6 +384,8 @@ export class LineLockService {
         eco: {
           ...existing.eco,
           ecoJiraKey: resolvedEcoKey,
+          projectKey: params.projectKey,
+          projectId: liveEco.projectId ?? existing.eco.projectId,
           lastEditorAccountId: params.callerAccountId,
           approvalGeneration: existing.eco.approvalGeneration + 1,
           liveEcoStatusCategoryKey: liveEco.statusCategoryKey
@@ -1350,6 +1359,11 @@ export class LineLockService {
       throw new AuthorizationError("Fleet overview requires a valid, explicit Jira project key.");
     }
     const projectCandidates = allWorkspaces.filter((ws) => {
+      if (ws.eco.projectKey) {
+        return ws.eco.projectKey.trim().toUpperCase() === normalizedProjectKey;
+      }
+      // Legacy records have no project identity. Preserve read compatibility
+      // using the old Jira issue-key prefix until explicitly migrated.
       const key = ws.eco.ecoJiraKey.trim().toUpperCase();
       const boundary = key.lastIndexOf("-");
       return boundary > 0 && key.slice(0, boundary) === normalizedProjectKey;
@@ -1611,6 +1625,18 @@ export class LineLockService {
         };
       }
 
+      const currentIssue = await this.jira.fetchLiveIssueByKeyOrId(params.ecoIssueId);
+      const projectRenamedOrMoved =
+        currentIssue.projectKey !== params.projectKey ||
+        (ws.eco.projectKey !== undefined && ws.eco.projectKey !== params.projectKey) ||
+        (ws.eco.projectId !== undefined && currentIssue.projectId !== undefined &&
+          ws.eco.projectId !== currentIssue.projectId);
+      if (projectRenamedOrMoved) {
+        return {
+          result: false,
+          errorMessage: "LineLock block: ECO project identity changed. A project administrator must review and reconfigure governance before release."
+        };
+      }
       const liveEval = await this.evaluateWorkspaceAgainstLiveJira(params.projectKey, ws);
       if (liveEval.gateState !== "READY_FOR_RELEASE_TRANSITION") {
         const detail = liveEval.blockingReasons[0] ?? `Current gate state is ${liveEval.gateState}`;
