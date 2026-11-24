@@ -44,6 +44,7 @@ import type {
   CounterfactualSimulationResult,
   CustomComponentSubstitutionRequest,
   EcoWorkspaceView,
+  EvidenceProvisioningLedger,
   GovernancePolicyMode,
   ScenarioPresetId
 } from "../forge/ports";
@@ -365,6 +366,10 @@ const LineLockAssuranceCockpit: React.FC = () => {
   const [customSerialFrom, setCustomSerialFrom] = useState<string>("5000");
   const [customSerialTo, setCustomSerialTo] = useState<string>("");
 
+  const [recoveryLedger, setRecoveryLedger] = useState<EvidenceProvisioningLedger | null>(null);
+  const [recoveryEvidenceId, setRecoveryEvidenceId] = useState<string>("");
+  const [recoveryJiraIssue, setRecoveryJiraIssue] = useState<string>("");
+
   const [bindEvidenceId, setBindEvidenceId] = useState<string>("EV-400-RIPPLE");
   const [bindJiraKey, setBindJiraKey] = useState<string>("");
 
@@ -669,6 +674,38 @@ const LineLockAssuranceCockpit: React.FC = () => {
       );
       setProbe(res.connectivity);
       await refreshView();
+    });
+
+  const inspectInterruptedProvisioning = (): Promise<void> =>
+    runAction("inspect-provisioning", async () => {
+      const ledger = unwrapInvoke(
+        await invoke<EvidenceProvisioningLedger | null>("getEvidenceProvisioningLedger")
+      );
+      setRecoveryLedger(ledger);
+      const uncertain = Object.values(ledger?.slots ?? {}).find(
+        (slot) => slot.stage === "CREATING" && !slot.jiraIssueId
+      );
+      setRecoveryEvidenceId(uncertain?.evidenceId ?? "");
+      setStatusNotice(ledger
+        ? `Provisioning: ${ledger.status}; ${Object.keys(ledger.slots).length}/6 evidence slots recorded.`
+        : "No interrupted evidence provisioning ledger exists for this ECO.");
+    });
+
+  const reconcileInterruptedProvisioning = (): Promise<void> =>
+    runAction("reconcile-provisioning", async () => {
+      if (!recoveryEvidenceId.trim() || !recoveryJiraIssue.trim()) {
+        throw new Error("Select an uncertain evidence ID and enter its actual Jira issue key.");
+      }
+      const ledger = unwrapInvoke(
+        await invoke<EvidenceProvisioningLedger>("reconcileUncertainProvisioningSlot", {
+          evidenceId: recoveryEvidenceId.trim(),
+          issueKeyOrId: recoveryJiraIssue.trim()
+        })
+      );
+      setRecoveryLedger(ledger);
+      setStatusNotice(
+        `Verified ${recoveryJiraIssue} against immutable Jira provenance. Resume setup using the existing Provision button; no new ticket is created for the recovered slot.`
+      );
     });
 
   const handleRecoverSql = (): Promise<void> =>
@@ -990,6 +1027,51 @@ const LineLockAssuranceCockpit: React.FC = () => {
                 Seed Offline Reference IDs Only
               </LoadingButton>
             </Inline>
+            <SectionMessage appearance="information" title="Interrupted setup? Resume safely">
+              <Stack space="space.100">
+                <Text>
+                  LineLock checkpoints each qualification issue. If Jira created a ticket but
+                  failed to return its ID, it will not create a duplicate. An administrator can
+                  inspect the ledger and reconcile the exact Jira ticket by its provenance.
+                </Text>
+                <LoadingButton
+                  isLoading={busyAction === "inspect-provisioning"}
+                  onClick={inspectInterruptedProvisioning}
+                >
+                  Inspect Provisioning Recovery
+                </LoadingButton>
+                {recoveryLedger ? (
+                  <Text>{`Ledger: ${recoveryLedger.status}; ${Object.keys(recoveryLedger.slots).length} evidence slots recorded.`}</Text>
+                ) : null}
+                {recoveryLedger && Object.values(recoveryLedger.slots).some(
+                  (slot) => slot.stage === "CREATING" && !slot.jiraIssueId
+                ) ? (
+                  <Stack space="space.100">
+                    <Text>
+                      An ambiguous Jira creation needs manual verification before setup can continue.
+                      Locate the ticket in Jira and enter its key below.
+                    </Text>
+                    <Textfield
+                      placeholder="Evidence ID reported by provisioning"
+                      value={recoveryEvidenceId}
+                      onChange={(e) => setRecoveryEvidenceId(extractEventString(e))}
+                    />
+                    <Textfield
+                      placeholder="Created Jira issue key, e.g. ECO-8"
+                      value={recoveryJiraIssue}
+                      onChange={(e) => setRecoveryJiraIssue(extractEventString(e))}
+                    />
+                    <LoadingButton
+                      appearance="primary"
+                      isLoading={busyAction === "reconcile-provisioning"}
+                      onClick={reconcileInterruptedProvisioning}
+                    >
+                      Verify Jira Provenance and Recover Slot
+                    </LoadingButton>
+                  </Stack>
+                ) : null}
+              </Stack>
+            </SectionMessage>
           </Stack>
         </Box>
       ) : null}
