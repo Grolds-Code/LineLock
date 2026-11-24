@@ -1309,6 +1309,7 @@ export class LineLockService {
     /** Runtime-user-filtered, issue-security-aware check, before any aggregation. */
     readonly canViewWorkspace?: (workspace: StoredEcoWorkspace) => Promise<boolean>;
     readonly readOnly?: boolean;
+    readonly cursor?: string;
   }): Promise<ProjectFleetOverview> {
     const provisioning = await this.provisioning.inspectStatus();
     const evaluatedAtEpochMs = this.now();
@@ -1355,15 +1356,31 @@ export class LineLockService {
     });
     // Filtering is performed BEFORE any totals or evidence evaluation so
     // restricted ECOs cannot leak through aggregate counts or verdicts.
-    const permitted = params.canViewWorkspace
-      ? await Promise.all(
-          projectCandidates.map(async (ws) => ({
-            ws,
-            allowed: await params.canViewWorkspace!(ws)
-          }))
-        )
-      : projectCandidates.map((ws) => ({ ws, allowed: true }));
-    const matching = permitted.filter((row) => row.allowed).map((row) => row.ws);
+    const offset = params.cursor === undefined ? 0 : Number(params.cursor);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000) {
+      throw new Error("Invalid Fleet page cursor.");
+    }
+    const pageSize = 25;
+    const neededVisible = offset + pageSize + 1;
+    const permitted: StoredEcoWorkspace[] = [];
+    // Bound Jira permission calls in batches, rather than firing one network
+    // request per ECO simultaneously. Stop as soon as the next-page sentinel
+    // is discovered. No restricted ECO contributes to totals or pagination.
+    for (let from = 0;
+      from < projectCandidates.length && permitted.length < neededVisible;
+      from += 8
+    ) {
+      const batch = projectCandidates.slice(from, from + 8);
+      const access = params.canViewWorkspace
+        ? await Promise.all(batch.map((ws) => params.canViewWorkspace!(ws)))
+        : batch.map(() => true);
+      for (let i = 0; i < batch.length; i++) {
+        if (access[i] && batch[i]) permitted.push(batch[i]!);
+      }
+    }
+    const hasMore = permitted.length > offset + pageSize;
+    const matching = permitted.slice(offset, offset + pageSize);
+    const nextCursor = hasMore ? String(offset + matching.length) : null;
 
     let verifiedReleasedCount = 0;
     let readyCount = 0;
@@ -1478,6 +1495,10 @@ export class LineLockService {
       provisioning,
       evaluatedAtEpochMs,
       totalEcos: ecoRows.length,
+      evaluatedCount: ecoRows.length,
+      hasMore,
+      nextCursor,
+      isPartialPage: hasMore || offset > 0,
       verifiedReleasedCount,
       readyCount,
       awaitingSignoffCount,
