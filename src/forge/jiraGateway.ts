@@ -494,6 +494,131 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     return provisioned;
   }
 
+  /**
+   * Idempotent per-slot completion with Jira-native provenance on the original
+   * create request. A missing SQL checkpoint after an uncertain POST is deliberately
+   * never retried automatically by the service.
+   */
+  public async provisionVerificationIssueSlot(params: {
+    readonly projectKey: string;
+    readonly ecoIssueKey: string;
+    readonly ecoIssueId: string;
+    readonly templateId: import("../scenarios/industryTemplates").IndustryTemplateId;
+    readonly spec: VerificationIssueSeedSpec;
+    readonly operationId: string;
+    readonly stage?: import("./ports").EvidenceSlotStage;
+    readonly existingIssueId?: string;
+    readonly existingIssueKey?: string;
+    readonly callbacks: import("./ports").CreateEvidenceSlotCallbacks;
+  }): Promise<ProvisionedVerificationIssue> {
+    const provenance = {
+      ecoIssueId: params.ecoIssueId,
+      ecoIssueKey: params.ecoIssueKey,
+      projectKey: params.projectKey,
+      templateId: params.templateId,
+      evidenceId: params.spec.evidenceId,
+      operationId: params.operationId
+    };
+
+    let issueId = params.existingIssueId ?? "";
+    let issueKey = params.existingIssueKey ?? "";
+    if (!issueId) {
+      const issueTypeId = await this.resolveStandardIssueTypeId(params.projectKey);
+      const createRes = await this.requestJiraResilient(route`/rest/api/3/issue`, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fields: {
+            project: { key: params.projectKey },
+            issuetype: { id: issueTypeId },
+            summary: params.spec.summary,
+            description: buildAdfDocument(params.spec.description)
+          },
+          properties: [{ key: "linelock.provenance", value: provenance }]
+        })
+      });
+      if (!createRes.ok) {
+        throw new Error(
+          `Qualification issue creation failed for ${params.spec.evidenceId}: HTTP ${createRes.status}. The slot is marked uncertain until reviewed.`
+        );
+      }
+      const created = (await createRes.json()) as { readonly id: string; readonly key: string };
+      issueId = String(created.id);
+      issueKey = created.key;
+      // Persist Jira identity immediately, before any further Jira write.
+      await params.callbacks.onCreated(issueId, issueKey);
+    } else {
+      // Never trust a user-entered issue ID or stale checkpoint without verifying
+      // the atomically written Jira property and immutable parent identity.
+      const propRes = await this.requestJiraResilient(
+        route`/rest/api/3/issue/${issueId}/properties/linelock.provenance`
+      );
+      if (!propRes.ok) {
+        throw new Error(`Cannot verify provenance for qualification issue ${issueId}.`);
+      }
+      const prop = (await propRes.json()) as { readonly value?: Record<string, unknown> };
+      for (const [field, expected] of Object.entries(provenance)) {
+        if (prop.value?.[field] !== expected) {
+          throw new Error(`Qualification issue ${issueId} has mismatched provenance: ${field}.`);
+        }
+      }
+    }
+
+    const live = await this.fetchLiveIssue(issueId);
+    if (live.statusCategoryKey.toLowerCase() !== "done") {
+      await this.transitionIssueToDoneCategory(issueId);
+    }
+    await params.callbacks.onDone();
+
+    const linksRes = await this.requestJiraResilient(
+      route`/rest/api/3/issue/${issueId}?fields=issuelinks`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (!linksRes.ok) {
+      throw new Error(`Cannot verify parent ECO link for qualification issue ${issueId}.`);
+    }
+    const linksBody = (await linksRes.json()) as {
+      readonly fields?: {
+        readonly issuelinks?: readonly {
+          readonly inwardIssue?: { readonly id?: string; readonly key?: string };
+          readonly outwardIssue?: { readonly id?: string; readonly key?: string };
+        }[];
+      };
+    };
+    const alreadyLinked = (linksBody.fields?.issuelinks ?? []).some(
+      (link) => link.inwardIssue?.id === params.ecoIssueId ||
+        link.outwardIssue?.id === params.ecoIssueId ||
+        link.inwardIssue?.key === params.ecoIssueKey ||
+        link.outwardIssue?.key === params.ecoIssueKey
+    );
+    if (!alreadyLinked) {
+      const typeName = await this.resolveDefaultLinkTypeName();
+      if (!typeName) {
+        throw new Error("Jira issue linking is unavailable; qualification evidence is incomplete.");
+      }
+      const linkRes = await this.requestJiraResilient(route`/rest/api/3/issueLink`, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: { name: typeName },
+          inwardIssue: { key: issueKey || issueId },
+          outwardIssue: { key: params.ecoIssueKey }
+        })
+      });
+      if (!linkRes.ok) {
+        throw new Error(
+          `Jira refused the qualification link to ${params.ecoIssueKey}: HTTP ${linkRes.status}.`
+        );
+      }
+    }
+    await params.callbacks.onLinked();
+    const complete = await this.fetchLiveIssue(issueId);
+    if (complete.statusCategoryKey.toLowerCase() !== "done") {
+      throw new Error(`Qualification issue ${issueId} is no longer in Done.`);
+    }
+    return { evidenceId: params.spec.evidenceId, liveIssue: complete };
+  }
+
   public async postIssueComment(params: {
     readonly issueIdOrKey: string;
     readonly markdownText: string;
