@@ -3,7 +3,8 @@ import {
   assertUserCanReadIssue,
   assertUserCanReadProject,
   assertUserIssuePermissions,
-  assertUserProjectPermissions
+  assertUserProjectPermissions,
+  listUserProjectIssueTypes
 } from "./userAuthorization";
 import { Queue } from "@forge/events";
 import type { ChangeOperation } from "../core/types";
@@ -180,6 +181,41 @@ resolver.define("getProjectFleetOverview", async (req) => {
     projectKey: ctx.projectKey,
     callerAccountId: ctx.accountId,
     canViewWorkspace
+  });
+});
+
+resolver.define("getProjectGovernanceSetup", async (req) => {
+  const ctx = extractProjectContext(req.context);
+  await assertUserCanReadProject(ctx.projectKey);
+  return {
+    config: await sqlStore.getProjectGovernanceConfig(ctx.projectKey),
+    issueTypes: await listUserProjectIssueTypes(ctx.projectKey)
+  };
+});
+
+resolver.define("setProjectGovernanceIssueTypes", async (req) => {
+  const ctx = extractProjectContext(req.context);
+  await assertUserProjectPermissions(ctx.projectKey, ["ADMINISTER_PROJECTS"]);
+  const payload = (req.payload ?? {}) as { readonly issueTypeIds?: readonly string[] };
+  if (!Array.isArray(payload.issueTypeIds)) {
+    throw new Error("Select governed Jira issue types from the project's available types.");
+  }
+  const available = await listUserProjectIssueTypes(ctx.projectKey);
+  const byId = new Map(available.map((type) => [type.id, type.name]));
+  for (const id of payload.issueTypeIds) {
+    const name = byId.get(id);
+    if (!name) throw new Error(`Unknown Jira issue-type ID ${id} in this project.`);
+    if (["task", "story", "bug", "sub-task", "subtask"].includes(name.trim().toLowerCase())) {
+      throw new Error(
+        `Cannot govern broad Jira type "${name}" with this release-only validator. ` +
+        "Create a dedicated Engineering Change Order issue type to avoid blocking qualification tickets."
+      );
+    }
+  }
+  return defaultLineLockService.configureProjectGovernance({
+    projectKey: ctx.projectKey,
+    callerAccountId: ctx.accountId,
+    governedIssueTypeIds: payload.issueTypeIds
   });
 });
 
