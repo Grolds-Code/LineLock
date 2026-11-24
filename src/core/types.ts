@@ -144,6 +144,8 @@ export interface VerificationEvidence {
   readonly jiraIssueId: string;
   readonly jiraIssueKey: string;
   readonly pinnedIssueStateHash: string;
+  /** Missing version is byte-for-byte compatible with historic v1 snapshots. */
+  readonly hashProjectionVersion?: 1 | 2;
   readonly testedVariantId: string;
   /**
    * Complete map of governedSlotPaths -> itemRevId present in the physical test article.
@@ -200,6 +202,16 @@ export interface LiveJiraIssueProjection {
   readonly issueTypeName?: string;
   readonly summary: string;
   readonly description: string;
+  /** Raw Jira Atlassian Document Format, available for v2 evidence hashing. */
+  readonly descriptionAdf?: unknown;
+  /** Attachment metadata only, not attachment bytes. */
+  readonly attachmentMetadata?: readonly {
+    readonly id: string;
+    readonly filename: string;
+    readonly size: number;
+    readonly mimeType: string;
+    readonly created: string;
+  }[];
   readonly statusCategoryKey: "done" | "indeterminate" | "new" | string;
   readonly resolutionName: string | null;
   readonly updatedAtEpochMs: number;
