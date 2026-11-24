@@ -256,7 +256,7 @@ describe("Phase 3 Championship Hardening: Group-Role RBAC, Zero-Latency Receipt 
   });
 
   it("resolves Jira group-role actors for signing, blocks unprivileged users, and revokes trust live if group membership is removed before Done", async () => {
-    const { service, jira, provisioning } = buildPhase3Rig();
+    const { service, jira, provisioning, store } = buildPhase3Rig();
     await provisioning.runMigrations("install");
 
     const seeded = await service.provisionLiveJiraWorkspace({
