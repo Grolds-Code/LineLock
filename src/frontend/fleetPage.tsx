@@ -11,6 +11,7 @@ import ForgeReconciler, {
   Lozenge,
   ProgressBar,
   SectionMessage,
+  Select,
   Stack,
   Tag,
   Text,
@@ -18,7 +19,7 @@ import ForgeReconciler, {
 } from "@forge/react";
 import { invoke } from "@forge/bridge";
 import type { EcoGateState } from "../core/types";
-import type { ProjectFleetOverview } from "../forge/ports";
+import type { ProjectFleetOverview, ProjectGovernanceConfig } from "../forge/ports";
 
 function unwrapInvoke<T>(raw: T | { readonly body: T }): T {
   if (raw && typeof raw === "object" && "body" in raw) {
@@ -111,6 +112,11 @@ const LineLockFleetAssurancePage: React.FC = () => {
   const [overview, setOverview] = useState<ProjectFleetOverview | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [governanceSetup, setGovernanceSetup] = useState<{
+    readonly config: ProjectGovernanceConfig | null;
+    readonly issueTypes: readonly { readonly id: string; readonly name: string }[];
+  } | null>(null);
+  const [selectedGovernedType, setSelectedGovernedType] = useState<string>("");
 
   const loadFleet = async (): Promise<void> => {
     setBusyAction("refresh");
@@ -118,6 +124,18 @@ const LineLockFleetAssurancePage: React.FC = () => {
     try {
       const res = unwrapInvoke(await invoke<ProjectFleetOverview>("getProjectFleetOverview"));
       setOverview(res);
+      try {
+        const setup = unwrapInvoke(await invoke<{
+          readonly config: ProjectGovernanceConfig | null;
+          readonly issueTypes: readonly { readonly id: string; readonly name: string }[];
+        }>("getProjectGovernanceSetup"));
+        setGovernanceSetup(setup);
+        if (setup.config?.governedIssueTypeIds[0]) {
+          setSelectedGovernedType(setup.config.governedIssueTypeIds[0]);
+        }
+      } catch {
+        // Fleet visibility is independent of optional admin setup access.
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     } finally {
@@ -133,6 +151,29 @@ const LineLockFleetAssurancePage: React.FC = () => {
       await loadFleet();
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
+      setBusyAction(null);
+    }
+  };
+
+  const saveGovernedIssueType = async (): Promise<void> => {
+    setBusyAction("save-governance");
+    setErrorMsg(null);
+    try {
+      if (!selectedGovernedType) {
+        throw new Error("Select a dedicated Engineering Change Order issue type.");
+      }
+      const config = unwrapInvoke(await invoke<ProjectGovernanceConfig>(
+        "setProjectGovernanceIssueTypes",
+        { issueTypeIds: [selectedGovernedType] }
+      ));
+      setGovernanceSetup((previous) => previous
+        ? { ...previous, config }
+        : previous
+      );
+      await loadFleet();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
       setBusyAction(null);
     }
   };
@@ -241,6 +282,46 @@ const LineLockFleetAssurancePage: React.FC = () => {
           </Inline>
         </Stack>
       </Box>
+
+      {governanceSetup ? (
+        <Box xcss={cardBoxStyle}>
+          <Stack space="space.100">
+            <Heading size="small">Release gate issue-type policy</Heading>
+            <Text>
+              Restrict LineLock's mandatory release gate to a dedicated Jira Engineering
+              Change Order type. Ordinary Tasks and qualification test tickets remain
+              outside the gate. Only a Jira project administrator may change this policy.
+            </Text>
+            <Text>
+              {governanceSetup.config
+                ? `Configured: ${governanceSetup.config.governedIssueTypeIds.join(", ")} (issue-type IDs). Changed by ${governanceSetup.config.updatedByAccountId}.`
+                : "Not configured: compatibility type-name matching is active. Set a dedicated ECO type before production use."}
+            </Text>
+            <Inline space="space.100" alignBlock="end" shouldWrap>
+              <Select
+                options={governanceSetup.issueTypes.filter(
+                  (item) => !["task", "story", "bug", "sub-task", "subtask"].includes(
+                    item.name.trim().toLowerCase()
+                  )
+                ).map((item) => ({ label: item.name, value: item.id }))}
+                value={governanceSetup.issueTypes
+                  .filter((item) => item.id === selectedGovernedType)
+                  .map((item) => ({ label: item.name, value: item.id }))[0] ?? null}
+                onChange={(option: { value?: string } | null) => {
+                  setSelectedGovernedType(option?.value ?? "");
+                }}
+              />
+              <LoadingButton
+                appearance="primary"
+                isLoading={busyAction === "save-governance"}
+                onClick={() => void saveGovernedIssueType()}
+              >
+                Save Governed ECO Type
+              </LoadingButton>
+            </Inline>
+          </Stack>
+        </Box>
+      ) : null}
 
       {errorMsg ? (
         <SectionMessage appearance="error" title="Fleet Telemetry Error">
