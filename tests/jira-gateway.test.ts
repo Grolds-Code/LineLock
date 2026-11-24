@@ -133,10 +133,14 @@ vi.mock("@forge/api", () => {
   });
 
   let simulateAsAppUnavailableToken = false;
+  let simulateAsUserUnavailableToken = false;
 
   return {
     __setSimulateAsAppUnavailableToken: (v: boolean) => {
       simulateAsAppUnavailableToken = v;
+    },
+    __setSimulateAsUserUnavailableToken: (v: boolean) => {
+      simulateAsUserUnavailableToken = v;
     },
     default: {
       asApp: () => ({
@@ -149,7 +153,14 @@ vi.mock("@forge/api", () => {
           return mockRequestJira(pathObj);
         }
       }),
-      asUser: () => ({ requestJira: mockRequestJira })
+      asUser: () => ({
+        requestJira: async (pathObj: { value?: string } | string) => {
+          if (simulateAsUserUnavailableToken) {
+            throw new Error("NEEDS_AUTHENTICATION: Jira user consent required");
+          }
+          return mockRequestJira(pathObj);
+        }
+      })
     },
     route: (strings: TemplateStringsArray, ...values: unknown[]) => ({
       value: strings.reduce((acc, str, idx) => acc + str + (values[idx] !== undefined ? String(values[idx]) : ""), "")
@@ -161,6 +172,21 @@ import * as mockedForgeApi from "@forge/api";
 import { ForgeJiraPlatformGateway } from "../src/forge/jiraGateway";
 
 describe("ForgeJiraPlatformGateway — @forge/api REST Contract", () => {
+  it("fails closed on missing Rovo asUser consent and never escalates to asApp", async () => {
+    const ctl = mockedForgeApi as unknown as {
+      __setSimulateAsUserUnavailableToken: (v: boolean) => void;
+    };
+    ctl.__setSimulateAsUserUnavailableToken(true);
+    try {
+      const userOnly = new ForgeJiraPlatformGateway("user");
+      await expect(userOnly.fetchLiveIssue("20204")).rejects.toThrow(/NEEDS_AUTHENTICATION/);
+      const systemOnly = new ForgeJiraPlatformGateway("app");
+      expect((await systemOnly.fetchLiveIssue("20204")).issueKey).toBe("ECO-204");
+    } finally {
+      ctl.__setSimulateAsUserUnavailableToken(false);
+    }
+  });
+
   it("executes connectivity probe, parses ADF issue descriptions, resolves direct + group role actors, and posts ADF audit comments", async () => {
     const gateway = new ForgeJiraPlatformGateway();
 
