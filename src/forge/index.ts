@@ -183,6 +183,31 @@ resolver.define("getProjectFleetOverview", async (req) => {
   });
 });
 
+resolver.define("getEvidenceProvisioningLedger", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  await assertUserProjectPermissions(ctx.projectKey, ["ADMINISTER_PROJECTS"]);
+  return sqlStore.getProvisioningLedger(ctx.issueId);
+});
+
+resolver.define("reconcileUncertainProvisioningSlot", async (req) => {
+  const ctx = extractIssueContext(req.context);
+  await assertUserProjectPermissions(ctx.projectKey, ["ADMINISTER_PROJECTS"]);
+  const payload = (req.payload ?? {}) as {
+    readonly evidenceId?: string;
+    readonly issueKeyOrId?: string;
+  };
+  if (!payload.evidenceId?.trim() || !payload.issueKeyOrId?.trim()) {
+    throw new Error("Recovery requires an evidence ID and the created Jira issue key.");
+  }
+  await assertUserCanReadIssue(payload.issueKeyOrId);
+  return defaultLineLockService.reconcileUncertainProvisioningSlot({
+    ecoIssueId: ctx.issueId,
+    projectKey: ctx.projectKey,
+    evidenceId: payload.evidenceId.trim(),
+    issueKeyOrId: payload.issueKeyOrId.trim()
+  });
+});
+
 resolver.define("seedHeliosWorkspace", async (req) => {
   const ctx = extractIssueContext(req.context);
   await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
