@@ -175,12 +175,14 @@ resolver.define("getWorkspaceView", async (req) => {
 
 resolver.define("getProjectFleetOverview", async (req) => {
   const ctx = extractProjectContext(req.context);
-  // No client-controlled projectKey override. The project is signed by Forge.
+  const payload = (req.payload ?? {}) as { readonly cursor?: string };
+  // Only cursor is accepted from the client; project identity is Forge-signed.
   await assertUserCanReadProject(ctx.projectKey);
   return defaultLineLockService.getProjectFleetOverview({
     projectKey: ctx.projectKey,
     callerAccountId: ctx.accountId,
-    canViewWorkspace
+    canViewWorkspace,
+    cursor: payload.cursor
   });
 });
 
