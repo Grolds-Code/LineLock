@@ -407,8 +407,10 @@ export interface VerificationEvaluation {
 }
 
 export const qty = (mantissa: number, scale: number, unit: string): ScalarValue => {
-  if (!Number.isSafeInteger(mantissa) || !Number.isSafeInteger(scale)) {
-    throw new RangeError(`Quantity mantissa (${mantissa}) and scale (${scale}) must be safe integers.`);
+  if (!Number.isSafeInteger(mantissa) || !Number.isSafeInteger(scale) || Math.abs(scale) > 18) {
+    throw new RangeError(
+      `Quantity mantissa (${mantissa}) must be a safe integer and scale (${scale}) must be an integer in [-18, 18].`
+    );
   }
   if (!unit || unit.trim() !== unit) {
     throw new RangeError(`Quantity unit must be a non-empty canonical symbol, got "${unit}".`);
