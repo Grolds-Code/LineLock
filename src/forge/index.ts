@@ -1,4 +1,10 @@
 import Resolver from "@forge/resolver";
+import {
+  assertUserCanReadIssue,
+  assertUserCanReadProject,
+  assertUserIssuePermissions,
+  assertUserProjectPermissions
+} from "./userAuthorization";
 import { Queue } from "@forge/events";
 import type { ChangeOperation } from "../core/types";
 import { buildHeliosCapRevCSubstitution } from "../scenarios/heliosBatteryPack";
@@ -81,18 +87,22 @@ const resolver = new Resolver();
 
 resolver.define("probeConnectivity", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserCanReadIssue(ctx.issueId);
   return defaultLineLockService.runConnectivityProbe({
     projectKey: ctx.projectKey,
     issueId: ctx.issueId
   });
 });
 
-resolver.define("triggerProvisioningRecovery", async () => {
+resolver.define("triggerProvisioningRecovery", async (req) => {
+  const ctx = extractProjectContext(req.context);
+  await assertUserProjectPermissions(ctx.projectKey, ["ADMINISTER_PROJECTS"]);
   return defaultLineLockService.triggerProvisioningRecovery("manual-panel-recovery");
 });
 
 resolver.define("getWorkspaceView", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserCanReadIssue(ctx.issueId);
   return defaultLineLockService.getWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
@@ -101,16 +111,26 @@ resolver.define("getWorkspaceView", async (req) => {
 });
 
 resolver.define("getProjectFleetOverview", async (req) => {
-  const payload = (req.payload ?? {}) as { readonly projectKey?: string };
   const ctx = extractProjectContext(req.context);
+  // No client-controlled projectKey override. The project is signed by Forge.
+  await assertUserCanReadProject(ctx.projectKey);
   return defaultLineLockService.getProjectFleetOverview({
-    projectKey: payload.projectKey?.trim() || ctx.projectKey,
-    callerAccountId: ctx.accountId
+    projectKey: ctx.projectKey,
+    callerAccountId: ctx.accountId,
+    canViewWorkspace: async (ws) => {
+      try {
+        await assertUserCanReadIssue(ws.ecoIssueId);
+        return true;
+      } catch {
+        return false;
+      }
+    }
   });
 });
 
 resolver.define("seedHeliosWorkspace", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
   const payload = (req.payload ?? {}) as { readonly templateId?: IndustryTemplateId };
   await defaultLineLockService.seedReferenceWorkspace({
     ecoIssueId: ctx.issueId,
@@ -127,6 +147,8 @@ resolver.define("seedHeliosWorkspace", async (req) => {
 
 resolver.define("provisionLiveJiraWorkspace", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
+    await assertUserProjectPermissions(ctx.projectKey, ["CREATE_ISSUES", "TRANSITION_ISSUES"]);
   const payload = (req.payload ?? {}) as { readonly templateId?: IndustryTemplateId };
   return defaultLineLockService.provisionLiveJiraWorkspace({
     projectKey: ctx.projectKey,
@@ -139,6 +161,7 @@ resolver.define("provisionLiveJiraWorkspace", async (req) => {
 
 resolver.define("applyScenarioPreset", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly presetId: ScenarioPresetId;
@@ -154,6 +177,7 @@ resolver.define("applyScenarioPreset", async (req) => {
 
 resolver.define("simulateCounterfactual", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserCanReadIssue(ctx.issueId);
   const payload = (req.payload ?? {}) as {
     readonly request: CounterfactualRequest;
     readonly includeBaselines?: boolean;
@@ -168,6 +192,7 @@ resolver.define("simulateCounterfactual", async (req) => {
 
 resolver.define("commitCounterfactualOperations", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly proposedOperations: readonly ChangeOperation[];
@@ -188,6 +213,7 @@ resolver.define("commitCounterfactualOperations", async (req) => {
 
 resolver.define("authorCustomComponentSubstitution", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly request: CustomComponentSubstitutionRequest;
@@ -203,10 +229,12 @@ resolver.define("authorCustomComponentSubstitution", async (req) => {
 
 resolver.define("bindCustomJiraEvidenceTicket", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly request: BindJiraEvidenceRequest;
   };
+  await assertUserCanReadIssue(payload.request.jiraIssueKeyOrId);
   return defaultLineLockService.bindCustomJiraEvidenceTicket({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
@@ -218,6 +246,7 @@ resolver.define("bindCustomJiraEvidenceTicket", async (req) => {
 
 resolver.define("switchGovernancePolicyMode", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserProjectPermissions(ctx.projectKey, ["ADMINISTER_PROJECTS"]);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly mode: GovernancePolicyMode;
@@ -233,6 +262,7 @@ resolver.define("switchGovernancePolicyMode", async (req) => {
 
 resolver.define("proposeCapRevCFrom5000", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly targetVariants?: "ALL" | readonly string[];
@@ -266,6 +296,7 @@ resolver.define("proposeCapRevCFrom5000", async (req) => {
 
 resolver.define("revertToBaselineBom", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
   const payload = (req.payload ?? {}) as { readonly expectedRevisionSeq: number };
   await defaultLineLockService.commitProposalOperations({
     projectKey: ctx.projectKey,
@@ -283,6 +314,7 @@ resolver.define("revertToBaselineBom", async (req) => {
 
 resolver.define("signRoleAttestation", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserCanReadIssue(ctx.issueId);
   const payload = (req.payload ?? {}) as {
     readonly expectedRevisionSeq: number;
     readonly expectedSnapshotSha256: string;
@@ -309,6 +341,7 @@ resolver.define("signRoleAttestation", async (req) => {
 
 resolver.define("repinLiveEvidenceHashes", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["EDIT_ISSUES"]);
   const payload = (req.payload ?? {}) as { readonly expectedRevisionSeq: number };
   return defaultLineLockService.repinLiveEvidenceHashes({
     projectKey: ctx.projectKey,
@@ -320,6 +353,7 @@ resolver.define("repinLiveEvidenceHashes", async (req) => {
 
 resolver.define("postAuditRecordComment", async (req) => {
   const ctx = extractIssueContext(req.context);
+  await assertUserIssuePermissions(ctx.issueId, ["ADD_COMMENTS"]);
   return defaultLineLockService.postAuditRecordComment({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
