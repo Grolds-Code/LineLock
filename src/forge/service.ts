@@ -278,15 +278,41 @@ export class LineLockService {
     const existingLedger = this.store.getProvisioningLedger
       ? await this.store.getProvisioningLedger(params.ecoIssueId)
       : null;
-    if (existingWorkspace && (!existingLedger || existingLedger.status === "COMPLETE")) {
+    const hasPristineOfflineReference = Boolean(
+      existingWorkspace &&
+      existingWorkspace.catalog.familyId === templateCatalog.familyId &&
+      existingWorkspace.eco.approvalGeneration === 1 &&
+      existingWorkspace.proposedOperations.length === 0 &&
+      existingWorkspace.attestations.length === 0 &&
+      !existingWorkspace.pendingTransitionIntent &&
+      !existingWorkspace.finalizedReleaseReceipt &&
+      existingWorkspace.catalog.evidenceRecords.length === templateCatalog.evidenceRecords.length &&
+      existingWorkspace.catalog.evidenceRecords.every((ev) => {
+        const reference = templateCatalog.evidenceRecords.find(
+          (candidate) => candidate.evidenceId === ev.evidenceId
+        );
+        return Boolean(reference && ev.jiraIssueId === reference.jiraIssueId);
+      })
+    );
+    if (existingWorkspace) {
       if (existingWorkspace.catalog.familyId !== templateCatalog.familyId) {
         throw new Error("This ECO already belongs to another industry template. Provisioning cannot overwrite it.");
       }
-      return this.getWorkspaceView({
-        projectKey: params.projectKey,
-        ecoIssueId: params.ecoIssueId,
-        callerAccountId: params.callerAccountId
-      });
+      if (existingLedger?.status === "COMPLETE" ||
+          (!existingLedger && !hasPristineOfflineReference)) {
+        return this.getWorkspaceView({
+          projectKey: params.projectKey,
+          ecoIssueId: params.ecoIssueId,
+          callerAccountId: params.callerAccountId
+        });
+      }
+      if (existingLedger && !hasPristineOfflineReference &&
+          !(Object.keys(existingLedger.slots).length === specs.length &&
+            Object.values(existingLedger.slots).every((slot) => slot.stage === "LINKED"))) {
+        throw new Error(
+          "Cannot resume evidence provisioning after this ECO's proposal or approvals changed. Administrator review required."
+        );
+      }
     }
     if (existingWorkspace && existingLedger &&
         Object.keys(existingLedger.slots).length === specs.length &&
