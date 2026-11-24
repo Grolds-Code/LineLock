@@ -233,7 +233,7 @@ const LineLockFleetAssurancePage: React.FC = () => {
               text={`SQL: ${overview?.provisioning.state ?? "CHECKING"}`}
               color="teal"
             />
-            <Tag text="Runs on Atlassian" color="blue" />
+            <Tag text="Forge-native · no external egress" color="blue" />
             <Tag text="Atlassian Rovo Analyst Ready" color="green" />
             {overview ? (
               <Code>{`Total Slice × Obligations Audited: ${bc.totalSliceObligations}`}</Code>
