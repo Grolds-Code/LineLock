@@ -1,8 +1,21 @@
 # LineLock
 
-**Effectivity-Aware Verification of Engineering Evidence for Jira on Atlassian Forge**
+**The closest Jira ticket to Done is not necessarily a safe engineering release.**
 
-> **Runs on Atlassian Eligible** · **Zero External Egress** · **Multi-Industry Regulated Hardware (Automotive EV, MedTech IEC 60601, Aerospace DO-160G + Custom Studio)** · **Strong Kleene ($K_3$) Deterministic Kernel** · **Space-Wide Fleet Portfolio (`jira:projectPage`)** · **Forge SQL TiDB Conditional CAS** · **Two-Phase Jira Workflow Gate** · **Read-Only Rovo Counterfactual Analyst (`rovo:agent`)**
+LineLock is a Forge-native, deterministic evidence gate for engineering changes.
+It identifies which products and serial ranges are affected, what recorded tests
+really cover, and the narrowest defensible next step. Rovo can explain and
+simulate alternatives without approving or changing a release.
+
+**For Codegeist judges:** [four-minute demo plan, installation acceptance checklist,
+and submission proof](docs/CODEGEIST_2026_SUBMISSION.md).
+
+> **Runs on Forge; official eligibility check pending** · **Zero External Egress** · **Multi-Industry Regulated Hardware (Automotive EV, MedTech IEC 60601, Aerospace DO-160G + Custom Studio)** · **Strong Kleene ($K_3$) Deterministic Kernel** · **Space-Wide Fleet Portfolio (`jira:projectPage`)** · **Forge SQL TiDB Conditional CAS** · **Two-Phase Jira Workflow Gate** · **Read-Only Rovo Counterfactual Analyst (`rovo:agent`)**
+
+> **Codegeist status:** The synthetic benchmark and code-level CI are not substitutes
+> for a fresh Jira Cloud installation, a public YouTube demonstration, a shareable
+> installation link, and official `forge eligibility` output. Those must be verified
+> before the project is represented as submission-ready.
 
 > **Scope & Safety Boundary:** LineLock verifies the completeness, integrity, and applicability of recorded engineering qualification evidence against effective bill-of-materials (BOM) configurations, explicit operating envelopes, and human-authorized carry-forward rules. It does **not** certify physical product safety or statutory regulatory compliance.
 
@@ -18,8 +31,8 @@ LineLock solves this natively inside Jira Cloud across **Automotive EV**, **MedT
 - **Elementary Serial-Interval & Variant Decomposition:** Partitions `[serialFrom, serialTo)` effectivity edges (open-ended `[SN 5000..+inf)` or lot-bounded `[SN 5000..8000)`) across product variants and enforces structural cycle/overlap diagnostics.
 - **Closed-World Dependency & Envelope Partitions:** Every obligation declares `governedSlotPaths` $\sqcup$ justified `excludedSlots` and `governedEnvelopeKeys` $\sqcup$ justified `excludedEnvelopeKeys`. Missing governed test bindings (`INDETERMINATE_INCOMPLETE_EVIDENCE_FOOTPRINT`) or unclassified new components (`INDETERMINATE_UNEXAMINED_DEPENDENCY`) block fail-closed.
 - **Strong Kleene ($K_3$) Scaled-Decimal Carry-Forward:** Evaluates `TRUE | FALSE | UNKNOWN` predicates using exact `BigInt` scaled arithmetic (`mantissa * 10^scale`) and mandatory canonical units—preventing IEEE-754 rounding errors and ensuring `!UNKNOWN == UNKNOWN` never silently passes missing data.
-- **Multi-Industry Templates + Custom Component & Jira Evidence Studio:** Provision live 6-ticket qualification suites in 1 click for **Automotive EV (`ISO 26262 / LV124`)**, **MedTech Class III Infusion Pump (`IEC 60601-1 / 60601-2-24`)**, or **Aerospace Flight Actuator (`RTCA DO-160G`)**, author custom `APPROVED` / `DRAFT` component revisions with arbitrary quantitative attributes, and bind any existing `Done` Jira ticket as RFC 8785 SHA-256 content-pinned evidence.
-- **Space-Wide Fleet Assurance Portfolio (`jira:projectPage`):** Space portfolio dashboard (`LineLock Fleet Assurance` under the Space top tab bar / `More`) with native `@forge/react` `DonutChart`, `BarChart`, and `ProgressBar` analytics auditing every initialized ECO across the Jira space.
+- **Multi-Industry Templates + Custom Component & Jira Evidence Studio:** Provision live 6-ticket qualification suites in 1 click for **Automotive EV (`ISO 26262 / LV124`)**, **MedTech Class III Infusion Pump (`IEC 60601-1 / 60601-2-24`)**, or **Aerospace Flight Actuator (`RTCA DO-160G`)**, author custom `APPROVED` / `DRAFT` revisions for existing governed slots, and bind authorized `Done` Jira evidence from the same project. New evidence uses v2 selected-field hashes (including raw ADF and attachment metadata); existing v1 pins remain compatible.
+- **Space-Wide Fleet Assurance Portfolio (`jira:projectPage`):** Space portfolio dashboard (`LineLock Fleet Assurance` under the Space top tab bar / `More`) with native `@forge/react` `DonutChart`, `BarChart`, and `ProgressBar` analytics auditing pages of up to 25 caller-visible initialized ECOs with explicit partial-page counts.
 - **ABA-Resistant Human Governance & Honest Two-Phase Workflow Gate:** Every `RoleAttestation` binds `(snapshotSha256, approvalGeneration, policyVersion)` with live Jira Project Role RBAC (direct + group actors). `jira:workflowValidator` writes a TTL-bounded `PendingTransitionIntent` via Forge SQL CAS (`affectedRows === 1`) before Jira commits, promoted to `FinalizedReleaseReceipt` iff Jira reaches `Done` without post-validation drift.
 - **Read-Only Rovo Counterfactual & Fleet Analyst (`rovo:agent`):** Exposes four strictly `GET` read-only actions (`ll-act-inspect-eco`, `ll-act-sim-cutover`, `ll-act-baselines`, `ll-act-fleet-status`) to Rovo without AI ever mutating state or bypassing deterministic verification.
 
