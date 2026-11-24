@@ -1033,6 +1033,8 @@ export class LineLockService {
   public async getProjectFleetOverview(params: {
     readonly projectKey: string;
     readonly callerAccountId?: string;
+    /** Runtime-user-filtered, issue-security-aware check, before any aggregation. */
+    readonly canViewWorkspace?: (workspace: StoredEcoWorkspace) => Promise<boolean>;
   }): Promise<ProjectFleetOverview> {
     const provisioning = await this.provisioning.inspectStatus();
     const evaluatedAtEpochMs = this.now();
@@ -1072,11 +1074,22 @@ export class LineLockService {
     if (!/^[A-Z][A-Z0-9_]*$/.test(normalizedProjectKey)) {
       throw new AuthorizationError("Fleet overview requires a valid, explicit Jira project key.");
     }
-    const matching = allWorkspaces.filter((ws) => {
+    const projectCandidates = allWorkspaces.filter((ws) => {
       const key = ws.eco.ecoJiraKey.trim().toUpperCase();
       const boundary = key.lastIndexOf("-");
       return boundary > 0 && key.slice(0, boundary) === normalizedProjectKey;
     });
+    // Filtering is performed BEFORE any totals or evidence evaluation so
+    // restricted ECOs cannot leak through aggregate counts or verdicts.
+    const permitted = params.canViewWorkspace
+      ? await Promise.all(
+          projectCandidates.map(async (ws) => ({
+            ws,
+            allowed: await params.canViewWorkspace!(ws)
+          }))
+        )
+      : projectCandidates.map((ws) => ({ ws, allowed: true }));
+    const matching = permitted.filter((row) => row.allowed).map((row) => row.ws);
 
     let verifiedReleasedCount = 0;
     let readyCount = 0;
