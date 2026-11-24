@@ -141,6 +141,8 @@ export interface EcoWorkspaceView {
   readonly evidenceIntegrity?: readonly LiveEvidenceIntegrityRow[];
   readonly releaseAssuranceMarkdown?: string;
   readonly baselineSummary?: BaselineTotalsSummary;
+  /** Live Jira is Done while receipt promotion has not been persisted. */
+  readonly reconciliationStatus?: "PENDING_RELEASE_RECONCILIATION";
 }
 
 export type ScenarioPresetId =
