@@ -975,8 +975,12 @@ export class LineLockService {
       );
     }
 
-    if (this.store.registerEvidenceIssueIds) {
-      await this.store.registerEvidenceIssueIds([targetIssue.issueId]);
+    // A pre-existing Done ticket is already past the initial transition.
+    // It must never gain a global release-gate exemption merely by being bound.
+    if (targetIssue.projectKey !== params.projectKey) {
+      throw new AuthorizationError(
+        "Custom qualification evidence must belong to the ECO's Jira project."
+      );
     }
 
     const pinnedHash = computePinnedIssueStateHash(targetIssue);
@@ -1063,12 +1067,15 @@ export class LineLockService {
 
     const allWorkspaces = await this.store.listEcoWorkspaces();
     const normalizedProjectKey = params.projectKey.trim().toUpperCase();
+    // Never interpret a missing, malformed, or wildcard key as a request for
+    // all projects. Fleet aggregation must remain project-scoped.
+    if (!/^[A-Z][A-Z0-9_]*$/.test(normalizedProjectKey)) {
+      throw new AuthorizationError("Fleet overview requires a valid, explicit Jira project key.");
+    }
     const matching = allWorkspaces.filter((ws) => {
-      if (!normalizedProjectKey || normalizedProjectKey === "*") return true;
-      const key = ws.eco.ecoJiraKey.trim();
-      if (!key.includes("-")) return true;
-      const prefix = (key.split("-")[0] ?? "").toUpperCase();
-      return prefix === normalizedProjectKey;
+      const key = ws.eco.ecoJiraKey.trim().toUpperCase();
+      const boundary = key.lastIndexOf("-");
+      return boundary > 0 && key.slice(0, boundary) === normalizedProjectKey;
     });
 
     let verifiedReleasedCount = 0;
@@ -1220,13 +1227,22 @@ export class LineLockService {
 
       const ws = await this.store.getEcoWorkspace(params.ecoIssueId);
       if (!ws) {
-        if (this.store.isRegisteredEvidenceIssue) {
-          const isChildEvidenceTicket = await this.store.isRegisteredEvidenceIssue(
-            params.ecoIssueId
-          );
-          if (isChildEvidenceTicket) {
-            return { result: true };
-          }
+        // A historical global evidence-ID registry must not be an authorization
+        // capability. An arbitrary Done issue could otherwise be registered and
+        // later transition uninitialized ECOs without verification.
+        //
+        // Only actual Jira issue types determine whether an uninitialized work
+        // item belongs to the configured ECO class. Unknown type fails closed.
+        const liveIssue = await this.jira.fetchLiveIssue(params.ecoIssueId);
+        const issueType = liveIssue.issueTypeName?.trim().toLowerCase();
+        if (
+          issueType &&
+          issueType !== "engineering change order" &&
+          issueType !== "engineering change" &&
+          issueType !== "eco" &&
+          issueType !== "change"
+        ) {
+          return { result: true };
         }
         return {
           result: false,
