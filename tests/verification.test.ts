@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { ForgeSQLAPIError, errorCodes } from "@forge/sql";
 import {
   canonicalizeJson,
+  compareExactQuantities,
   computePinnedIssueStateHash,
   computeSnapshotSha256,
   evaluateB0TimestampStatus,
@@ -187,6 +188,20 @@ function createTestHarness(options?: { readonly clusterEnabled?: boolean }) {
 }
 
 describe("LineLock Vertical Slice — Core Engine, Adversarial Counterexamples & Forge Consistency", () => {
+  it("rejects billion-digit decimal expansion and unsafe numeric scales before allocation", () => {
+    expect(() => qty(1, -1_000_000_000, "V")).toThrow(RangeError);
+    expect(() => qty(1, 1_000_000_000, "V")).toThrow(RangeError);
+    expect(() => qty(1, 0, "V")).not.toThrow();
+    expect(() => compareExactQuantities(
+      { mantissa: 1n, scale: -1_000_000_000, unit: "V" },
+      { mantissa: 1n, scale: 0, unit: "V" }
+    )).toThrow(RangeError);
+    expect(compareExactQuantities(
+      { mantissa: 250n, scale: -2, unit: "V" },
+      { mantissa: 25n, scale: -1, unit: "V" }
+    )).toEqual({ comparable: true, cmp: 0 });
+  });
+
   it("T00: enforces strict pure-kernel trust boundary (zero @forge/* or network imports in src/core)", () => {
     const coreDir = join(process.cwd(), "src", "core");
     const files = readdirSync(coreDir).filter((f) => f.endsWith(".ts"));
