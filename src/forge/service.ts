@@ -122,6 +122,7 @@ export class LineLockService {
     readonly projectKey: string;
     readonly ecoIssueId: string;
     readonly callerAccountId?: string;
+    readonly readOnly?: boolean;
   }): Promise<EcoWorkspaceView> {
     const provisioning = await this.provisioning.inspectStatus();
     if (provisioning.state !== "READY") {
@@ -145,11 +146,13 @@ export class LineLockService {
       };
     }
 
-    workspace = await this.maybeFinalizePendingTransitionIntent(
-      params.projectKey,
-      params.ecoIssueId,
-      workspace
-    );
+    if (!params.readOnly) {
+      workspace = await this.maybeFinalizePendingTransitionIntent(
+        params.projectKey,
+        params.ecoIssueId,
+        workspace
+      );
+    }
 
     const { evaluation, evidenceIntegrity, baselineSummary } =
       await this.evaluateWorkspaceWithIntegrity(
@@ -165,6 +168,14 @@ export class LineLockService {
       evaluation,
       finalizedReceipt: workspace.finalizedReleaseReceipt
     });
+    const liveEcoForReconciliation = params.readOnly && workspace.pendingTransitionIntent
+      ? await this.jira.fetchLiveIssue(params.ecoIssueId)
+      : null;
+    const reconciliationStatus =
+      liveEcoForReconciliation?.statusCategoryKey.toLowerCase() === "done" &&
+      !workspace.finalizedReleaseReceipt
+        ? "PENDING_RELEASE_RECONCILIATION" as const
+        : undefined;
     return {
       callerAccountId: params.callerAccountId,
       provisioning,
@@ -172,7 +183,8 @@ export class LineLockService {
       evaluation,
       evidenceIntegrity,
       releaseAssuranceMarkdown,
-      baselineSummary
+      baselineSummary,
+      reconciliationStatus
     };
   }
 
@@ -414,8 +426,10 @@ export class LineLockService {
     readonly ecoIssueId: string;
     readonly request: CounterfactualRequest;
     readonly includeBaselines?: boolean;
+    readonly readOnly?: boolean;
   }): Promise<CounterfactualSimulationResult> {
-    await this.ensureProvisionedOrThrow();
+    if (params.readOnly) await this.requireAlreadyProvisioned();
+    else await this.ensureProvisionedOrThrow();
     const ws = await this.mustLoadWorkspace(params.ecoIssueId);
 
     const proposedOperations = this.buildOperationsForCounterfactual(ws.catalog, params.request);
@@ -1035,6 +1049,7 @@ export class LineLockService {
     readonly callerAccountId?: string;
     /** Runtime-user-filtered, issue-security-aware check, before any aggregation. */
     readonly canViewWorkspace?: (workspace: StoredEcoWorkspace) => Promise<boolean>;
+    readonly readOnly?: boolean;
   }): Promise<ProjectFleetOverview> {
     const provisioning = await this.provisioning.inspectStatus();
     const evaluatedAtEpochMs = this.now();
@@ -1116,11 +1131,13 @@ export class LineLockService {
           ? params.projectKey
           : (rawWs.eco.ecoJiraKey.split("-")[0] ?? "ECO");
 
-      const ws = await this.maybeFinalizePendingTransitionIntent(
-        targetProjectKey,
-        rawWs.ecoIssueId,
-        rawWs
-      );
+      const ws = params.readOnly
+        ? rawWs
+        : await this.maybeFinalizePendingTransitionIntent(
+            targetProjectKey,
+            rawWs.ecoIssueId,
+            rawWs
+          );
 
       let evaluated;
       try {
@@ -1452,14 +1469,18 @@ export class LineLockService {
   public async compareCurrentEcoAgainstBaselines(params: {
     readonly projectKey: string;
     readonly ecoIssueId: string;
+    readonly readOnly?: boolean;
   }) {
-    await this.ensureProvisionedOrThrow();
+    if (params.readOnly) await this.requireAlreadyProvisioned();
+    else await this.ensureProvisionedOrThrow();
     let ws = await this.mustLoadWorkspace(params.ecoIssueId);
-    ws = await this.maybeFinalizePendingTransitionIntent(
-      params.projectKey,
-      params.ecoIssueId,
-      ws
-    );
+    if (!params.readOnly) {
+      ws = await this.maybeFinalizePendingTransitionIntent(
+        params.projectKey,
+        params.ecoIssueId,
+        ws
+      );
+    }
     const { liveEco, trustedRoles, liveIssuesById } = await this.fetchLiveVerificationContext(
       params.projectKey,
       ws
@@ -1968,6 +1989,17 @@ export class LineLockService {
       roles.add(catalog.policy.carryForwardDispositionRole);
     }
     return [...roles].sort();
+  }
+
+  /** Rovo GET must never trigger lazy DDL or migrations. */
+  private async requireAlreadyProvisioned(): Promise<void> {
+    const status = await this.provisioning.inspectStatus();
+    if (status.state !== "READY") {
+      throw new ProvisioningNotReadyError(
+        status.state,
+        "LineLock SQL is not ready. An administrator must complete provisioning outside Rovo."
+      );
+    }
   }
 
   private async ensureProvisionedOrThrow(): Promise<void> {
