@@ -49,6 +49,36 @@ export async function assertUserCanReadProject(projectKey: string): Promise<void
   }
 }
 
+/** List server-defined issue types; the browser never supplies authoritative IDs. */
+export async function listUserProjectIssueTypes(
+  projectKey: string
+): Promise<readonly { readonly id: string; readonly name: string }[]> {
+  await assertUserCanReadProject(projectKey);
+  const key = projectKey.trim().toUpperCase();
+  try {
+    const response = await api.asUser().requestJira(
+      route`/rest/api/3/project/${key}`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = (await response.json()) as {
+      readonly issueTypes?: readonly {
+        readonly id?: string;
+        readonly name?: string;
+        readonly subtask?: boolean;
+      }[];
+    };
+    return (body.issueTypes ?? [])
+      .filter((t) => t.id && t.name && !t.subtask)
+      .map((t) => ({ id: t.id!, name: t.name! }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    throw new InteractiveAccessDeniedError(
+      "Jira issue types could not be listed in user context. Check permissions and consent."
+    );
+  }
+}
+
 export async function assertUserIssuePermissions(
   issueId: string,
   permissions: readonly string[]
