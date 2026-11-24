@@ -860,9 +860,10 @@ export class LineLockService {
     };
     const primaryKey = req.primaryNumericAttrKey.trim();
     const primaryUnit = req.primaryNumericUnit.trim();
-    if (!primaryKey || !primaryUnit || !Number.isFinite(req.primaryNumericValue)) {
+    if (!primaryKey || !primaryUnit || !Number.isSafeInteger(req.primaryNumericValue) ||
+        !Number.isSafeInteger(req.primaryNumericScale) || Math.abs(req.primaryNumericScale) > 18) {
       throw new Error(
-        "Valid primaryNumericAttrKey, primaryNumericValue, and primaryNumericUnit are required."
+        "Custom component requires an attribute key, unit, safe-integer mantissa and decimal scale in [-18, 18]."
       );
     }
     const scale = Number.isFinite(req.primaryNumericScale)
