@@ -22,5 +22,10 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      - name: Validate cloud deployment helper syntax
+        run: |
+          bash -n scripts/forge-dev-deploy.sh
+          node -e "JSON.parse(require('node:fs').readFileSync('.devcontainer/devcontainer.json', 'utf8'))"
+
       - name: Run strict typecheck, adversarial suite, benchmark & Forge bundler
         run: npm run verify
