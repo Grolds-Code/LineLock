@@ -15,7 +15,8 @@ import type {
   CustomComponentSubstitutionRequest,
   GovernancePolicyMode,
   IndustryTemplateId,
-  ScenarioPresetId
+  ScenarioPresetId,
+  type StoredEcoWorkspace
 } from "./ports";
 import { SqlProvisioningManager } from "./provisioning";
 import { createRovoActionHandlers } from "./rovo";
@@ -83,6 +84,60 @@ function extractProjectContext(rawContext: unknown): {
   return { accountId, projectKey };
 }
 
+/** Authorization is checked against Jira as the invoking user, never asApp. */
+async function assertWorkspaceVisible(ws: StoredEcoWorkspace): Promise<void> {
+  await assertUserCanReadIssue(ws.ecoIssueId);
+  // A readable ECO is not permission to disclose restricted linked lab issues.
+  // All evidence must be accessible to the user before a detailed view is exposed.
+  await Promise.all(
+    ws.catalog.evidenceRecords.map((ev) => assertUserCanReadIssue(ev.jiraIssueId))
+  );
+}
+
+async function canViewWorkspace(ws: StoredEcoWorkspace): Promise<boolean> {
+  try {
+    await assertWorkspaceVisible(ws);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function authorizedWorkspaceView(params: {
+  readonly projectKey: string;
+  readonly ecoIssueId: string;
+  readonly callerAccountId?: string;
+}) {
+  await assertUserCanReadIssue(params.ecoIssueId);
+  const view = await defaultLineLockService.getWorkspaceView(params);
+  if (view.workspace) await assertWorkspaceVisible(view.workspace);
+  return view;
+}
+
+/** Rovo's issue key is untrusted tool input, even when inferred from chat context. */
+function resolveRovoIssueKey(payload: unknown): string {
+  const p = (payload ?? {}) as {
+    readonly issueKey?: string;
+    readonly context?: {
+      readonly issueKey?: string;
+      readonly jira?: { readonly issueKey?: string };
+    };
+  };
+  const candidate = p.issueKey ?? p.context?.jira?.issueKey ?? p.context?.issueKey;
+  const key = typeof candidate === "string" ? candidate.trim() : "";
+  if (!key) throw new Error("Select a Jira engineering change or supply its issue key.");
+  return key;
+}
+
+async function authorizeRovoIssue(issueKey: string): Promise<void> {
+  await assertUserCanReadIssue(issueKey);
+  const provisioning = await provisioningManager.inspectStatus();
+  if (provisioning.state !== "READY") return;
+  const issue = await jiraGateway.fetchLiveIssueByKeyOrId(issueKey);
+  const ws = await sqlStore.getEcoWorkspace(issue.issueId);
+  if (ws) await assertWorkspaceVisible(ws);
+}
+
 const resolver = new Resolver();
 
 resolver.define("probeConnectivity", async (req) => {
@@ -103,7 +158,7 @@ resolver.define("triggerProvisioningRecovery", async (req) => {
 resolver.define("getWorkspaceView", async (req) => {
   const ctx = extractIssueContext(req.context);
   await assertUserCanReadIssue(ctx.issueId);
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -117,14 +172,7 @@ resolver.define("getProjectFleetOverview", async (req) => {
   return defaultLineLockService.getProjectFleetOverview({
     projectKey: ctx.projectKey,
     callerAccountId: ctx.accountId,
-    canViewWorkspace: async (ws) => {
-      try {
-        await assertUserCanReadIssue(ws.ecoIssueId);
-        return true;
-      } catch {
-        return false;
-      }
-    }
+    canViewWorkspace
   });
 });
 
@@ -138,7 +186,7 @@ resolver.define("seedHeliosWorkspace", async (req) => {
     callerAccountId: ctx.accountId,
     templateId: payload.templateId
   });
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -204,7 +252,7 @@ resolver.define("commitCounterfactualOperations", async (req) => {
     callerAccountId: ctx.accountId,
     proposedOperations: payload.proposedOperations
   });
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -287,7 +335,7 @@ resolver.define("proposeCapRevCFrom5000", async (req) => {
     callerAccountId: ctx.accountId,
     proposedOperations: ops
   });
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -305,7 +353,7 @@ resolver.define("revertToBaselineBom", async (req) => {
     callerAccountId: ctx.accountId,
     proposedOperations: []
   });
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -332,7 +380,7 @@ resolver.define("signRoleAttestation", async (req) => {
     roleName: payload.roleName,
     rationale: payload.rationale
   });
-  return defaultLineLockService.getWorkspaceView({
+  return authorizedWorkspaceView({
     projectKey: ctx.projectKey,
     ecoIssueId: ctx.issueId,
     callerAccountId: ctx.accountId
@@ -429,7 +477,9 @@ export async function migrationQueueConsumerHandler(event: {
 }
 
 export async function rovoInspectEcoHandler(payload: { readonly issueKey?: string }) {
-  return rovoHandlers.inspectEcoAssurance(payload);
+  const issueKey = resolveRovoIssueKey(payload);
+  await authorizeRovoIssue(issueKey);
+  return rovoHandlers.inspectEcoAssurance({ ...payload, issueKey });
 }
 
 export async function rovoSimulateCutoverHandler(payload: {
@@ -438,15 +488,21 @@ export async function rovoSimulateCutoverHandler(payload: {
   readonly serialFrom?: number;
   readonly serialTo?: number;
 }) {
-  return rovoHandlers.simulateSerialCutover(payload);
+  const issueKey = resolveRovoIssueKey(payload);
+  await authorizeRovoIssue(issueKey);
+  return rovoHandlers.simulateSerialCutover({ ...payload, issueKey });
 }
 
 export async function rovoCompareBaselinesHandler(payload: { readonly issueKey?: string }) {
-  return rovoHandlers.compareBaselines(payload);
+  const issueKey = resolveRovoIssueKey(payload);
+  await authorizeRovoIssue(issueKey);
+  return rovoHandlers.compareBaselines({ ...payload, issueKey });
 }
 
 export async function rovoFleetOverviewHandler(payload: { readonly projectKey?: string }) {
-  return rovoHandlers.inspectProjectFleet(payload);
+  const key = payload.projectKey?.trim() ?? "";
+  await assertUserCanReadProject(key);
+  return rovoHandlers.inspectProjectFleet({ projectKey: key }, { canViewWorkspace });
 }
 
 export * from "./ports";
