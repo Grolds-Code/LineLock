@@ -46,6 +46,35 @@ export interface StoredEcoWorkspace {
   readonly unvalidatedDriftDetected: boolean;
 }
 
+/** Durable, per-ECO state machine; intentionally separate from release snapshots. */
+export type EvidenceSlotStage = "CREATING" | "CREATED" | "DONE" | "LINKED";
+export interface EvidenceProvisioningSlot {
+  readonly evidenceId: string;
+  readonly operationId: string;
+  readonly stage: EvidenceSlotStage;
+  readonly jiraIssueId?: string;
+  readonly jiraIssueKey?: string;
+}
+
+export interface EvidenceProvisioningLedger {
+  readonly ecoIssueId: string;
+  readonly ecoIssueKey: string;
+  readonly projectKey: string;
+  readonly templateId: IndustryTemplateId;
+  readonly ownerId: string;
+  readonly leaseUntilEpochMs: number;
+  readonly status: "IN_PROGRESS" | "FAILED" | "COMPLETE";
+  readonly slots: Readonly<Record<string, EvidenceProvisioningSlot>>;
+  /** TiDB compare-and-swap revision, unrelated to the ECO approval generation. */
+  readonly revisionSeq: number;
+}
+
+export interface CreateEvidenceSlotCallbacks {
+  readonly onCreated: (issueId: string, issueKey: string) => Promise<void>;
+  readonly onDone: () => Promise<void>;
+  readonly onLinked: () => Promise<void>;
+}
+
 export interface VerificationStore {
   getEcoWorkspace(ecoIssueId: string): Promise<StoredEcoWorkspace | null>;
   listEcoWorkspaces?(): Promise<readonly StoredEcoWorkspace[]>;
@@ -58,6 +87,14 @@ export interface VerificationStore {
   ): Promise<StoredEcoWorkspace>;
   registerEvidenceIssueIds?(issueIds: readonly string[]): Promise<void>;
   isRegisteredEvidenceIssue?(issueId: string): Promise<boolean>;
+  getProvisioningLedger?(ecoIssueId: string): Promise<EvidenceProvisioningLedger | null>;
+  insertProvisioningLedger?(
+    ledger: Omit<EvidenceProvisioningLedger, "revisionSeq">
+  ): Promise<EvidenceProvisioningLedger>;
+  casProvisioningLedger?(
+    expectedRevisionSeq: number,
+    ledger: Omit<EvidenceProvisioningLedger, "revisionSeq">
+  ): Promise<EvidenceProvisioningLedger>;
 }
 
 export interface ConnectivityProbeResult {
@@ -93,6 +130,19 @@ export interface JiraPlatformGateway {
     requiredRoles: readonly string[],
     candidateAccountIds?: readonly string[]
   ): Promise<Record<string, readonly string[]>>;
+  /** Per-slot recoverable provisioning. Older test adapters may implement bulk only. */
+  provisionVerificationIssueSlot?(params: {
+    readonly projectKey: string;
+    readonly ecoIssueKey: string;
+    readonly ecoIssueId: string;
+    readonly templateId: IndustryTemplateId;
+    readonly spec: VerificationIssueSeedSpec;
+    readonly operationId: string;
+    readonly stage?: EvidenceSlotStage;
+    readonly existingIssueId?: string;
+    readonly existingIssueKey?: string;
+    readonly callbacks: CreateEvidenceSlotCallbacks;
+  }): Promise<ProvisionedVerificationIssue>;
   provisionVerificationIssues(params: {
     readonly projectKey: string;
     readonly ecoIssueKey: string;
