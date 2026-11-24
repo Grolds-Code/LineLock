@@ -197,6 +197,8 @@ export type ChangeOperation =
 export interface LiveJiraIssueProjection {
   readonly issueId: string;
   readonly issueKey: string;
+  readonly projectKey?: string;
+  readonly projectId?: string;
   /** Jira's server-provided issue type identity, excluded from v1 evidence/snapshot hashes. */
   readonly issueTypeId?: string;
   readonly issueTypeName?: string;
@@ -264,6 +266,9 @@ export interface FinalizedReleaseReceipt {
 export interface EcoMetadata {
   readonly ecoJiraIssueId: string;
   readonly ecoJiraKey: string;
+  /** Optional for backwards-compatible persisted workspaces; excluded from v1 SHA. */
+  readonly projectKey?: string;
+  readonly projectId?: string;
   readonly ecoCreatedAtEpochMs: number;
   readonly authorAccountId: string;
   readonly lastEditorAccountId: string;
