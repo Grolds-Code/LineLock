@@ -1667,6 +1667,19 @@ export class LineLockService {
         ? "ALL"
         : req.targetVariants.map((v) => normalizeVariantId(v));
 
+    // These are EV-specific counterfactual operations. Never inject an
+    // automotive part or BOM slot into a medical or aerospace catalog.
+    if ((isMedTech || isAero) && req.kind === "GATE_DRIVER_REV_B_CUTOVER") {
+      throw new Error(
+        "Gate-driver revision substitution is an Automotive EV operation. Use a catalog-specific Custom Studio substitution."
+      );
+    }
+    if (isAero && req.kind === "CAP_REV_D_DRAFT_CUTOVER") {
+      throw new Error(
+        "The Aerospace template has no corresponding draft resolver revision. Define the engineering sample in Custom Studio."
+      );
+    }
+
     switch (req.kind) {
       case "CAP_REV_C_CUTOVER":
         if (isMedTech || isAero) {
