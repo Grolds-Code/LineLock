@@ -49,6 +49,7 @@ interface JiraIssueRestResponse {
   readonly key: string;
   readonly fields: {
     readonly summary?: string;
+    readonly issuetype?: { readonly id?: string; readonly name?: string };
     readonly description?: unknown;
     readonly updated?: string;
     readonly project?: {
@@ -252,7 +253,7 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     issueKeyOrId: string
   ): Promise<LiveJiraIssueProjection & { readonly projectKey: string }> {
     const res = await this.requestJiraResilient(
-      route`/rest/api/3/issue/${issueKeyOrId}?fields=summary,description,status,resolution,updated,project`,
+      route`/rest/api/3/issue/${issueKeyOrId}?fields=summary,description,status,resolution,updated,project,issuetype`,
       { headers: { Accept: "application/json" } }
     );
 
@@ -269,6 +270,8 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       issueId: String(body.id),
       issueKey: body.key,
       projectKey,
+      issueTypeId: body.fields.issuetype?.id,
+      issueTypeName: body.fields.issuetype?.name,
       summary: body.fields.summary ?? "",
       description: extractAdfPlainText(body.fields.description),
       statusCategoryKey: body.fields.status?.statusCategory?.key ?? "unknown",
