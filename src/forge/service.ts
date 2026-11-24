@@ -265,15 +265,12 @@ export class LineLockService {
       };
     });
 
+    // No global transition exemption registry is created. Jira issue-type
+    // scoping allows ordinary qualification Tasks to reach Done safely.
     const provisionedList = await this.jira.provisionVerificationIssues({
       projectKey: params.projectKey,
       ecoIssueKey: resolvedEcoKey,
-      specs,
-      onCreatedBeforeTransition: async (createdIds) => {
-        if (this.store.registerEvidenceIssueIds) {
-          await this.store.registerEvidenceIssueIds(createdIds);
-        }
-      }
+      specs
     });
 
     const provisionedByEvidenceId = new Map(
