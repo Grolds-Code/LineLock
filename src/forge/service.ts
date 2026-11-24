@@ -398,6 +398,58 @@ export class LineLockService {
   }
 
   /**
+   * Recovery deliberately requires a human to supply the observed Jira issue.
+   * The app accepts it only when Jira's create-time property matches the exact
+   * ledger operation UUID, parent ECO and obligation. Never guess from summaries.
+   */
+  public async reconcileUncertainProvisioningSlot(params: {
+    readonly ecoIssueId: string;
+    readonly projectKey: string;
+    readonly evidenceId: string;
+    readonly issueKeyOrId: string;
+  }): Promise<EvidenceProvisioningLedger> {
+    await this.ensureProvisionedOrThrow();
+    if (!this.store.getProvisioningLedger || !this.store.casProvisioningLedger ||
+        !this.jira.verifyProvisioningIssueProvenance) {
+      throw new Error("Verified evidence recovery is not configured.");
+    }
+    const ledger = await this.store.getProvisioningLedger(params.ecoIssueId);
+    if (!ledger || ledger.projectKey !== params.projectKey) {
+      throw new Error("No matching evidence provisioning ledger exists for this Jira project.");
+    }
+    if (ledger.status === "IN_PROGRESS" && ledger.leaseUntilEpochMs > this.now()) {
+      throw new ConcurrentModificationError("A provisioning worker still owns this ledger.");
+    }
+    const slot = ledger.slots[params.evidenceId];
+    if (!slot || slot.stage !== "CREATING" || slot.jiraIssueId) {
+      throw new Error("This evidence slot is not awaiting uncertain-creation reconciliation.");
+    }
+    const verified = await this.jira.verifyProvisioningIssueProvenance({
+      issueKeyOrId: params.issueKeyOrId,
+      ecoIssueId: ledger.ecoIssueId,
+      ecoIssueKey: ledger.ecoIssueKey,
+      projectKey: ledger.projectKey,
+      templateId: ledger.templateId,
+      evidenceId: slot.evidenceId,
+      operationId: slot.operationId
+    });
+    return this.store.casProvisioningLedger(ledger.revisionSeq, {
+      ...ledger,
+      status: "FAILED",
+      leaseUntilEpochMs: 0,
+      slots: {
+        ...ledger.slots,
+        [slot.evidenceId]: {
+          ...slot,
+          stage: "CREATED",
+          jiraIssueId: verified.jiraIssueId,
+          jiraIssueKey: verified.jiraIssueKey
+        }
+      }
+    });
+  }
+
+  /**
    * Crash-safe evidence provisioning on the real Jira gateway. A per-ECO TiDB
    * ledger serializes workers and preserves each externally committed Jira ID.
    * A slot with an uncertain POST result is NEVER created twice automatically.
