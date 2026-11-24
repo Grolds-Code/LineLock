@@ -8,6 +8,7 @@ import {
 import {
   ConcurrentModificationError,
   ProvisioningNotReadyError,
+  type EvidenceProvisioningLedger,
   type StoredEcoWorkspace,
   type VerificationStore
 } from "./ports";
@@ -194,6 +195,85 @@ export class ForgeSqlCasStore implements VerificationStore {
     };
   }
 
+  /** Ledger rows reuse the existing TiDB CAS table, without a DDL migration. */
+  private ledgerRowId(ecoIssueId: string): string {
+    const id = `__linelock_prov_ledger__:${ecoIssueId}`;
+    if (!ecoIssueId || id.length > 64) {
+      throw new RangeError("Jira ECO issue ID is too long for the provisioning ledger.");
+    }
+    return id;
+  }
+
+  public async getProvisioningLedger(ecoIssueId: string): Promise<EvidenceProvisioningLedger | null> {
+    const key = this.ledgerRowId(ecoIssueId);
+    const res = await this.sqlClient
+      .prepare<EcoWorkspaceSqlRow>(
+        "SELECT eco_issue_id, revision_seq, approval_generation, updated_at_epoch_ms, payload_json FROM linelock_eco_workspaces WHERE eco_issue_id = ?"
+      )
+      .bindParams(key)
+      .execute();
+    const row = res.rows[0];
+    if (!row) return null;
+    const persisted = JSON.parse(row.payload_json) as Omit<EvidenceProvisioningLedger, "revisionSeq">;
+    if (persisted.ecoIssueId !== ecoIssueId) {
+      throw new Error("Provisioning ledger key and payload disagree.");
+    }
+    return {
+      ...persisted,
+      revisionSeq: parseBigIntNumber(row.revision_seq, "revision_seq")
+    };
+  }
+
+  public async insertProvisioningLedger(
+    ledger: Omit<EvidenceProvisioningLedger, "revisionSeq">
+  ): Promise<EvidenceProvisioningLedger> {
+    const key = this.ledgerRowId(ledger.ecoIssueId);
+    try {
+      const res = await this.sqlClient
+        .prepare<UpdateQueryResponse>(
+          "INSERT INTO linelock_eco_workspaces (eco_issue_id, revision_seq, approval_generation, updated_at_epoch_ms, payload_json) VALUES (?, ?, ?, ?, ?)"
+        )
+        .bindParams(key, 1, 0, Date.now(), JSON.stringify(ledger))
+        .execute();
+      if (res.rows.affectedRows !== 1) {
+        throw new ConcurrentModificationError("Provisioning ledger claim was not inserted.");
+      }
+      return { ...ledger, revisionSeq: 1 };
+    } catch (err) {
+      if (isDuplicatePrimaryKeyError(err)) {
+        throw new ConcurrentModificationError(
+          "A provisioning operation already claimed this engineering change."
+        );
+      }
+      throw err;
+    }
+  }
+
+  public async casProvisioningLedger(
+    expectedRevisionSeq: number,
+    ledger: Omit<EvidenceProvisioningLedger, "revisionSeq">
+  ): Promise<EvidenceProvisioningLedger> {
+    if (!Number.isSafeInteger(expectedRevisionSeq) || expectedRevisionSeq < 1) {
+      throw new RangeError("Invalid provisioning ledger CAS revision.");
+    }
+    const key = this.ledgerRowId(ledger.ecoIssueId);
+    const res = await this.sqlClient
+      .prepare<UpdateQueryResponse>(
+        "UPDATE linelock_eco_workspaces SET revision_seq = ?, approval_generation = ?, updated_at_epoch_ms = ?, payload_json = ? WHERE eco_issue_id = ? AND revision_seq = ?"
+      )
+      .bindParams(
+        expectedRevisionSeq + 1, 0, Date.now(),
+        JSON.stringify(ledger), key, expectedRevisionSeq
+      )
+      .execute();
+    if (res.rows.affectedRows !== 1) {
+      throw new ConcurrentModificationError(
+        "Provisioning ledger was changed by another worker. Stop before another Jira write."
+      );
+    }
+    return { ...ledger, revisionSeq: expectedRevisionSeq + 1 };
+  }
+
   public async registerEvidenceIssueIds(issueIds: readonly string[]): Promise<void> {
     if (issueIds.length === 0) return;
     const registryKey = "__linelock_evidence_registry__";
@@ -292,7 +372,7 @@ export class ForgeSqlCasStore implements VerificationStore {
 
     const out: StoredEcoWorkspace[] = [];
     for (const row of res.rows) {
-      if (!row || row.eco_issue_id === registryKey) continue;
+      if (!row || row.eco_issue_id.startsWith("__linelock_")) continue;
       const payload = JSON.parse(row.payload_json) as PersistedPayload;
       out.push({
         ecoIssueId: row.eco_issue_id,
