@@ -860,7 +860,7 @@ const LineLockAssuranceCockpit: React.FC = () => {
 
           <Inline space="space.100" alignBlock="center" shouldWrap>
             <Tag text={`SQL: ${view?.provisioning.state ?? "CHECKING"}`} color="teal" />
-            <Tag text="Runs on Atlassian" color="blue" />
+            <Tag text="Forge-native · no external egress" color="blue" />
             {workspace ? (
               <Tag text={activeTemplate.standardReference} color="purple" />
             ) : null}
