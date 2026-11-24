@@ -494,6 +494,43 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     return provisioned;
   }
 
+  public async verifyProvisioningIssueProvenance(params: {
+    readonly issueKeyOrId: string;
+    readonly ecoIssueId: string;
+    readonly ecoIssueKey: string;
+    readonly projectKey: string;
+    readonly templateId: import("../scenarios/industryTemplates").IndustryTemplateId;
+    readonly evidenceId: string;
+    readonly operationId: string;
+  }): Promise<{ readonly jiraIssueId: string; readonly jiraIssueKey: string }> {
+    const issue = await this.fetchLiveIssueByKeyOrId(params.issueKeyOrId);
+    if (issue.projectKey !== params.projectKey) {
+      throw new Error("Recovery candidate belongs to the wrong Jira project.");
+    }
+    const propRes = await this.requestJiraResilient(
+      route`/rest/api/3/issue/${issue.issueId}/properties/linelock.provenance`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (!propRes.ok) {
+      throw new Error("Recovery candidate has no LineLock provenance property.");
+    }
+    const prop = (await propRes.json()) as { readonly value?: Record<string, unknown> };
+    const fields = {
+      ecoIssueId: params.ecoIssueId,
+      ecoIssueKey: params.ecoIssueKey,
+      projectKey: params.projectKey,
+      templateId: params.templateId,
+      evidenceId: params.evidenceId,
+      operationId: params.operationId
+    };
+    for (const [key, expected] of Object.entries(fields)) {
+      if (prop.value?.[key] !== expected) {
+        throw new Error(`Recovery candidate fails immutable LineLock provenance: ${key}.`);
+      }
+    }
+    return { jiraIssueId: issue.issueId, jiraIssueKey: issue.issueKey };
+  }
+
   /**
    * Idempotent per-slot completion with Jira-native provenance on the original
    * create request. A missing SQL checkpoint after an uncertain POST is deliberately
