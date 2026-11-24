@@ -51,6 +51,13 @@ interface JiraIssueRestResponse {
     readonly summary?: string;
     readonly issuetype?: { readonly id?: string; readonly name?: string };
     readonly description?: unknown;
+    readonly attachment?: readonly {
+      readonly id?: string;
+      readonly filename?: string;
+      readonly size?: number;
+      readonly mimeType?: string;
+      readonly created?: string;
+    }[];
     readonly updated?: string;
     readonly project?: {
       readonly key?: string;
@@ -253,7 +260,7 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     issueKeyOrId: string
   ): Promise<LiveJiraIssueProjection & { readonly projectKey: string }> {
     const res = await this.requestJiraResilient(
-      route`/rest/api/3/issue/${issueKeyOrId}?fields=summary,description,status,resolution,updated,project,issuetype`,
+      route`/rest/api/3/issue/${issueKeyOrId}?fields=summary,description,attachment,status,resolution,updated,project,issuetype`,
       { headers: { Accept: "application/json" } }
     );
 
@@ -274,6 +281,16 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       issueTypeName: body.fields.issuetype?.name,
       summary: body.fields.summary ?? "",
       description: extractAdfPlainText(body.fields.description),
+      descriptionAdf: body.fields.description ?? null,
+      attachmentMetadata: (body.fields.attachment ?? [])
+        .filter((a) => a.id && a.filename)
+        .map((a) => ({
+          id: a.id!,
+          filename: a.filename!,
+          size: a.size ?? 0,
+          mimeType: a.mimeType ?? "",
+          created: a.created ?? ""
+        })),
       statusCategoryKey: body.fields.status?.statusCategory?.key ?? "unknown",
       resolutionName: body.fields.resolution?.name ?? null,
       updatedAtEpochMs: Number.isFinite(updatedMs) ? updatedMs : 0,
