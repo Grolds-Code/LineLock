@@ -16,7 +16,7 @@ import type {
   GovernancePolicyMode,
   IndustryTemplateId,
   ScenarioPresetId,
-  type StoredEcoWorkspace
+  StoredEcoWorkspace
 } from "./ports";
 import { SqlProvisioningManager } from "./provisioning";
 import { createRovoActionHandlers } from "./rovo";
