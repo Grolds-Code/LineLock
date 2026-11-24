@@ -26,7 +26,8 @@ import { ForgeSqlCasStore } from "./sqlStore";
 
 const provisioningManager = new SqlProvisioningManager();
 const sqlStore = new ForgeSqlCasStore();
-const jiraGateway = new ForgeJiraPlatformGateway();
+const jiraGateway = new ForgeJiraPlatformGateway("app");
+const userScopedRovoGateway = new ForgeJiraPlatformGateway("user");
 
 export const defaultLineLockService = new LineLockService({
   store: sqlStore,
@@ -34,9 +35,17 @@ export const defaultLineLockService = new LineLockService({
   provisioning: provisioningManager
 });
 
+// This service shares deterministic kernel and SQL state but never uses
+// app-privileged Jira reads when invoked by Rovo's GET actions.
+const userScopedRovoService = new LineLockService({
+  store: sqlStore,
+  jira: userScopedRovoGateway,
+  provisioning: provisioningManager
+});
+
 const rovoHandlers = createRovoActionHandlers({
-  service: defaultLineLockService,
-  jira: jiraGateway
+  service: userScopedRovoService,
+  jira: userScopedRovoGateway
 });
 
 const schemaMigrationQueue = new Queue({ key: "schema-migration-queue" });
@@ -141,7 +150,7 @@ async function authorizeRovoIssue(issueKey: string): Promise<void> {
   await assertUserCanReadIssue(issueKey);
   const provisioning = await provisioningManager.inspectStatus();
   if (provisioning.state !== "READY") return;
-  const issue = await jiraGateway.fetchLiveIssueByKeyOrId(issueKey);
+  const issue = await userScopedRovoGateway.fetchLiveIssueByKeyOrId(issueKey);
   const ws = await sqlStore.getEcoWorkspace(issue.issueId);
   if (ws) await assertWorkspaceVisible(ws);
 }
