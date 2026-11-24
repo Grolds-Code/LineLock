@@ -409,6 +409,11 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
   }): Promise<readonly ProvisionedVerificationIssue[]> {
     const issueTypeId = await this.resolveStandardIssueTypeId(params.projectKey);
     const linkTypeName = await this.resolveDefaultLinkTypeName();
+    if (params.ecoIssueKey && !linkTypeName) {
+      throw new Error(
+        "Cannot provision traceable qualification issues: Jira issue linking is unavailable or the app cannot read link types."
+      );
+    }
 
     const createdItems: {
       readonly evidenceId: string;
@@ -460,21 +465,22 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       await this.transitionIssueToDoneCategory(item.id);
 
       if (linkTypeName && params.ecoIssueKey) {
-        try {
-          await this.requestJiraResilient(route`/rest/api/3/issueLink`, {
-            method: "POST",
-            headers: {
-              Accept: "application/json",
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              type: { name: linkTypeName },
-              inwardIssue: { key: item.key },
-              outwardIssue: { key: params.ecoIssueKey }
-            })
-          });
-        } catch {
-          // Non-fatal if link permissions or custom schemes restrict issueLink
+        const linkRes = await this.requestJiraResilient(route`/rest/api/3/issueLink`, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            type: { name: linkTypeName },
+            inwardIssue: { key: item.key },
+            outwardIssue: { key: params.ecoIssueKey }
+          })
+        });
+        if (!linkRes.ok) {
+          throw new Error(
+            `Qualification ticket ${item.key} could not be linked to ECO ${params.ecoIssueKey}: Jira HTTP ${linkRes.status}. Resolve link permissions before continuing.`
+          );
         }
       }
 
@@ -676,7 +682,9 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
     );
 
     if (!transRes.ok) {
-      return;
+      throw new Error(
+        `Cannot inspect available transitions for qualification issue ${issueId}: HTTP ${transRes.status}.`
+      );
     }
 
     const body = (await transRes.json()) as JiraTransitionsResponse;
@@ -684,10 +692,12 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
       (t) => t.to?.statusCategory?.key?.toLowerCase() === "done"
     );
     if (!doneTransition) {
-      return;
+      throw new Error(
+        `Qualification issue ${issueId} has no direct transition to Done. Configure a valid workflow or complete the necessary intermediate transitions manually.`
+      );
     }
 
-    await this.requestJiraResilient(route`/rest/api/3/issue/${issueId}/transitions`, {
+    const postRes = await this.requestJiraResilient(route`/rest/api/3/issue/${issueId}/transitions`, {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -697,6 +707,17 @@ export class ForgeJiraPlatformGateway implements JiraPlatformGateway {
         transition: { id: doneTransition.id }
       })
     });
+    if (!postRes.ok) {
+      throw new Error(
+        `Jira refused the Done transition for qualification issue ${issueId}: HTTP ${postRes.status}.`
+      );
+    }
+    const live = await this.fetchLiveIssue(issueId);
+    if (live.statusCategoryKey.toLowerCase() !== "done") {
+      throw new Error(
+        `Jira accepted the transition request but qualification issue ${issueId} is still ${live.statusCategoryKey}, not Done.`
+      );
+    }
   }
 
   private async resolveDefaultLinkTypeName(): Promise<string | null> {
